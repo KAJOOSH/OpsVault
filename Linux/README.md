@@ -16,8 +16,7 @@ Ports `465` and `587` are not blocked.
 ## Install
 
 ```bash
-chmod +x block-smtp25.sh
-sudo ./block-smtp25.sh
+curl -fsSL "https://raw.githubusercontent.com/KAJOOSH/OpsVault/refs/heads/main/Linux/block-smtp25.sh" -o /tmp/block-smtp25.sh && chmod +x /tmp/block-smtp25.sh && sudo /tmp/block-smtp25.sh
 ```
 
 ## Xray Rule
