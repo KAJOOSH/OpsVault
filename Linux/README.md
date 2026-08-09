@@ -1,6 +1,6 @@
-# Marzban / Xray SMTP Port 25 Block
+# SMTP Port 25 Block
 
-Permanently blocks outbound TCP/25 on a Marzban/Xray server.
+Permanently blocks outbound TCP/25 on a server.
 
 The firewall rules cover:
 
