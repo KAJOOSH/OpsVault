@@ -1,0 +1,101 @@
+name: omniroute
+
+services:
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    container_name: omniroute
+
+    restart: unless-stopped
+    stop_grace_period: 40s
+
+    ports:
+      # Only accessible from this Windows machine.
+      - "127.0.0.1:20128:20128"
+
+    environment:
+      NODE_ENV: production
+      CONTAINER_HOST: docker
+
+      # OmniRoute
+      PORT: 20128
+      DATA_DIR: /app/data
+      BASE_URL: http://localhost:20128
+      NEXT_PUBLIC_BASE_URL: http://localhost:20128
+
+      # Redis
+      REDIS_URL: redis://redis:6379
+
+      # Security
+      REQUIRE_API_KEY: "true"
+      AUTH_COOKIE_SECURE: "false"
+      ALLOW_API_KEY_REVEAL: "false"
+
+      STORAGE_ENCRYPTION_KEY: ${STORAGE_ENCRYPTION_KEY}
+      STORAGE_ENCRYPTION_KEY_VERSION: v1
+
+      # Required for Codex Responses WebSocket bridge
+      OMNIROUTE_WS_BRIDGE_SECRET: ${OMNIROUTE_WS_BRIDGE_SECRET}
+
+      # Node/V8 heap
+      OMNIROUTE_MEMORY_MB: ${OMNIROUTE_MEMORY_MB:-1024}
+
+    volumes:
+      - omniroute-data:/app/data
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    networks:
+      - omniroute-net
+
+
+  redis:
+    image: redis:7-alpine
+    container_name: omniroute-redis
+
+    restart: unless-stopped
+
+    command:
+      - redis-server
+      - --save
+      - "60"
+      - "1"
+      - --loglevel
+      - warning
+
+    # Intentionally no "ports:" section.
+    # Redis is accessible only inside the Docker network.
+
+    volumes:
+      - omniroute-redis-data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - omniroute-net
+
+
+volumes:
+  omniroute-data:
+    name: omniroute-data
+
+  omniroute-redis-data:
+    name: omniroute-redis-data
+
+
+networks:
+  omniroute-net:
+    name: omniroute-net
+    driver: bridge
