@@ -8,6 +8,15 @@
 
 ---
 
+
+## Quick Install
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/KAJOOSH/OpsVault/refs/heads/main/xray-user-monitor/install-xray-user-monitor.sh" -o /tmp/install-xray-user-monitor.sh && chmod +x /tmp/install-xray-user-monitor.sh && sudo /tmp/install-xray-user-monitor.sh
+```
+
+> Replace `USERNAME/REPOSITORY` with your actual GitHub repository path.
+
 ## قابلیت‌ها
 
 - اجرای دائمی در پس‌زمینه با `systemd`
@@ -127,6 +136,70 @@ Installer موارد زیر را ایجاد می‌کند:
 └── events.log
 
 /usr/local/bin/xraymon
+```
+
+---
+
+
+# نصب مستقیم از GitHub Raw
+
+اگر فایل `install-xray-user-monitor.sh` را داخل GitHub قرار داده‌اید، می‌توانید بدون Clone کردن Repository آن را مستقیماً دانلود و اجرا کنید.
+
+ابتدا آدرس Raw فایل را مطابق Repository خودتان تنظیم کنید:
+
+```text
+https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/install-xray-user-monitor.sh
+```
+
+مثلاً اگر Repository شما:
+
+```text
+https://github.com/USERNAME/xray-user-monitor
+```
+
+باشد، لینک Raw فایل Installer به شکل زیر خواهد بود:
+
+```text
+https://raw.githubusercontent.com/USERNAME/xray-user-monitor/main/install-xray-user-monitor.sh
+```
+
+## نصب با یک دستور
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/install-xray-user-monitor.sh" \
+  -o /tmp/install-xray-user-monitor.sh \
+  && chmod +x /tmp/install-xray-user-monitor.sh \
+  && sudo /tmp/install-xray-user-monitor.sh
+```
+
+یا به‌صورت یک خطی:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/install-xray-user-monitor.sh" -o /tmp/install-xray-user-monitor.sh && chmod +x /tmp/install-xray-user-monitor.sh && sudo /tmp/install-xray-user-monitor.sh
+```
+
+## اجرای مستقیم از Pipe
+
+اگر می‌خواهید بدون ذخیره فایل روی Disk اجرا شود:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/install-xray-user-monitor.sh" | sudo bash
+```
+
+> توصیه می‌شود برای سرور Production از روش اول استفاده کنید تا ابتدا فایل دانلود شود و در صورت نیاز بتوانید محتوای آن را قبل از اجرا بررسی کنید.
+
+## استفاده از Branch دیگر
+
+اگر Branch اصلی Repository شما `master` است:
+
+```text
+https://raw.githubusercontent.com/USERNAME/REPOSITORY/master/install-xray-user-monitor.sh
+```
+
+اگر فایل Installer داخل یک Folder قرار دارد، مسیر Folder را نیز به لینک اضافه کنید:
+
+```text
+https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/path/to/install-xray-user-monitor.sh
 ```
 
 ---
