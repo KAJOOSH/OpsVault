@@ -1,0 +1,20 @@
+# Environment / secrets
+.env
+**/.env
+!.env.example
+!**/.env.example
+
+# Runtime data
+*.log
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.vs

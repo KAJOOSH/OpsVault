@@ -1,3 +1,16 @@
 # OpsVault
 
-A personal repository for useful scripts, configurations, tools, and technical notes.
+مجموعه‌ای جمع‌وجور از اسکریپت‌ها، تنظیمات و ابزارهای عملیاتی برای مدیریت سرور، Docker، MikroTik و Xray.
+
+## ساختار
+
+| مسیر | محتوا |
+|---|---|
+| `linux/` | ابزارهای مدیریتی و شبکه در Linux |
+| `docker/` | سرویس‌ها و استقرارهای Docker Compose |
+| `mikrotik/` | تنظیمات RouterOS |
+| `xray/` | ابزارهای مرتبط با Xray و Marzban |
+
+هر ابزار در پوشه مستقل قرار دارد و README همان پوشه فقط شامل نصب، تنظیمات ضروری و دستورات مدیریتی است.
+
+> مقادیر محرمانه مانند رمز عبور، API Key و فایل `.env` واقعی را داخل Git قرار ندهید.

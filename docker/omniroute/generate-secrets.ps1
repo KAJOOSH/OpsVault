@@ -1,4 +1,4 @@
-# Generate STORAGE_ENCRYPTION_KEY
+# Generate STORAGE_ENCRYPTION_KEY and OMNIROUTE_WS_BRIDGE_SECRET, then write .env.
 $bytes = New-Object byte[] 32
 $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 $rng.GetBytes($bytes)
@@ -7,12 +7,9 @@ $storageKey = -join ($bytes | ForEach-Object {
     $_.ToString("x2")
 })
 
-# Generate OMNIROUTE_WS_BRIDGE_SECRET
 $bytes2 = New-Object byte[] 32
 $rng.GetBytes($bytes2)
-
 $wsSecret = [Convert]::ToBase64String($bytes2)
-
 $rng.Dispose()
 
 @"

@@ -1,0 +1,8 @@
+{
+  "method": "sms",
+  "mobile": "09XXXXXXXXX",
+  "templateID": 6742,
+  "params": [
+    "{% if heartbeatJSON %}{% if heartbeatJSON['status'] == 0 %}\n🖥️ سرور «{{ name }}»\n🔴 از دسترس خارج شد!{% elsif heartbeatJSON['status'] == 1 %}\n🖥️ سرور «{{ name }}»\n🟢 آنلاین شد{% else %}\n🖥️ سرور «{{ name }}»\n🔔 وضعیت تغییر کرده است.{% endif %}{% else %}\n🖥️ سرور «{{ name }}»\n🔔 وضعیت تغییر کرده است.{% endif %}"
+  ]
+}
