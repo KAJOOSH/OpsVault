@@ -1,1420 +1,1191 @@
-# Xray User Monitor for Marzban Node
-
-یک مانیتور سبک و دائمی برای **Marzban Node / Xray-core** که به شما کمک می‌کند بعد از وقوع مصرف غیرعادی CPU، مشخص کنید در همان بازه زمانی کدام کاربران بیشترین ترافیک، IP آنلاین یا Connection را داشته‌اند.
-
-این ابزار برای شرایطی طراحی شده که Xray ناگهان CPU زیادی مصرف می‌کند و حتی ممکن است مجبور شوید سرور را Restart کنید. اطلاعات قبل از Restart در SQLite ذخیره می‌شود و بعداً قابل بررسی است.
-
-> **نکته مهم:** تمام کاربران Xray داخل یک Process مشترک اجرا می‌شوند. بنابراین Linux نمی‌تواند به‌صورت مستقیم بگوید «فلان Username دقیقاً 80% CPU مصرف کرده است». این ابزار با ثبت همزمان CPU هسته، ترافیک کاربران، IPهای آنلاین و Connectionها، یک **هم‌بستگی زمانی بسیار قوی** برای پیدا کردن کاربر یا رفتار مشکوک ایجاد می‌کند.
-
----
-
-## قابلیت‌ها
-
-- اجرای دائمی در پس‌زمینه با `systemd`
-- شروع خودکار بعد از Reboot
-- مصرف بسیار پایین CPU و I/O
-- بدون اجرای Docker در حلقه Monitoring
-- استفاده از `grpcurl` به‌صورت Native
-- خواندن مستقیم `StatsService` هسته Xray
-- ثبت CPU واقعی Process هسته Xray
-- ثبت RAM و تعداد Threadهای Xray
-- ثبت Upload / Download هر User
-- ذخیره تاریخچه در SQLite
-- تشخیص خودکار High CPU Incident
-- ثبت زمان شروع و پایان Incident
-- ثبت Peak CPU
-- ثبت User دارای بیشترین Traffic در زمان Peak
-- Deep Scan فقط هنگام High CPU
-- بررسی IPهای آنلاین در صورت پشتیبانی Xray
-- تخمین Connectionهای TCP کاربر هنگام Incident
-- نگهداری Top-N کاربران برای جلوگیری از بزرگ شدن دیتابیس
-- پاک‌سازی خودکار History قدیمی
-- ادامه صحیح Monitoring بعد از Restart شدن Xray
-- ابزار CLI با نام `xraymon`
-- امکان بررسی Incident حتی بعد از Reboot کامل سرور
-
----
-
-# معماری
-
-در حالت عادی Monitor هر چند ثانیه یک Sample بسیار سبک می‌گیرد:
-
-```text
-                    ┌─────────────────┐
-                    │   Xray Process  │
-                    └────────┬────────┘
-                             │
-                  ┌──────────┴──────────┐
-                  │                     │
-               /proc                StatsService
-                  │                     │
-          CPU / RAM / Threads      QueryStats
-                                        │
-                               Per-user traffic
-                  │                     │
-                  └──────────┬──────────┘
-                             │
-                             ▼
-                        SQLite DB
-```
-
-هنگام بالا رفتن CPU:
-
-```text
-CPU >= Threshold
-       │
-       ├── Create Incident
-       │
-       ├── Save Peak CPU
-       │
-       ├── Save Top Users
-       │
-       ├── GetUsersStats
-       │      └── Online IPs
-       │
-       └── ss
-              └── Established TCP connections
-```
-
-`ss` و Deep Scan دائماً اجرا نمی‌شوند و فقط هنگام عبور CPU از Threshold فعال می‌شوند.
-
----
-
-# مناسب برای
-
-این ابزار برای سرورهایی مناسب است که:
-
-- روی آن‌ها **Marzban Node** اجرا می‌شود.
-- هسته Xray روی همان Node اجرا می‌شود.
-- API هسته Xray در دسترس Node است.
-- سیستم‌عامل Debian / Ubuntu و `systemd` دارد.
-
-پیش‌فرض ابزار برای ساختار رایج Marzban Node:
-
-```text
-Xray API Host: 127.0.0.1
-Xray API Port: 62051
-```
-
-است.
-
-اگر Node شما Port متفاوتی دارد، کافی است Config را تغییر دهید.
-
----
-
-# فایل Installer
-
-فایل اصلی:
-
-```text
-install-xray-user-monitor.sh
-```
-
-Installer موارد زیر را ایجاد می‌کند:
-
-```text
-/opt/xray-user-monitor/
-├── monitor.py
-├── report.py
-└── command.proto
-
-/etc/xray-user-monitor.conf
-
-/etc/systemd/system/xray-user-monitor.service
-
-/var/lib/xray-user-monitor/
-├── history.db
-└── events.log
-
-/usr/local/bin/xraymon
-```
-
----
-
-# نصب
-
-ابتدا فایل را Executable کنید:
-
-```bash
-chmod +x install-xray-user-monitor.sh
-```
-
-سپس با دسترسی Root اجرا کنید:
-
-```bash
-sudo ./install-xray-user-monitor.sh
-```
-
-Installer به‌صورت خودکار Dependencies موردنیاز را بررسی و در صورت نیاز نصب می‌کند.
-
-Dependencies اصلی:
-
-```text
-python3
-curl
-iproute2
-ca-certificates
-grpcurl
-```
-
-برای `grpcurl` نسخه Native نصب می‌شود و Docker برای Monitoring لازم نیست.
-
----
-
-# بررسی وضعیت سرویس
-
-```bash
-systemctl status xray-user-monitor --no-pager
-```
-
-نمایش Log زنده:
-
-```bash
-journalctl -u xray-user-monitor -f
-```
-
-Restart سرویس:
-
-```bash
-systemctl restart xray-user-monitor
-```
-
-Stop:
-
-```bash
-systemctl stop xray-user-monitor
-```
-
-Start:
-
-```bash
-systemctl start xray-user-monitor
-```
-
----
-
-# دستورات xraymon
-
-## وضعیت فعلی
-
-```bash
-xraymon status
-```
-
-نمونه خروجی:
-
-```text
-Time        : 2026-08-11 11:05:15
-Xray PID    : 1212
-Xray CPU    : 34.8%  (100% = one fully used CPU core)
-Xray RAM    : 274.3 MiB
-Threads     : 46
-User traffic: 218.31 Mbps  UP=18.25  DOWN=200.06
-Top user    : ali  84.52 Mbps
-Active users: 31
-Stats API   : OK (QueryStats)
-Event       : -
-```
-
-در ادامه Top Userهای همان Sample نیز نمایش داده می‌شوند.
-
----
-
-## نمایش زنده
-
-```bash
-watch -n 5 xraymon status
-```
-
-این دستور Query جدیدی به Xray ارسال نمی‌کند؛ فقط آخرین اطلاعات ذخیره‌شده در SQLite را نمایش می‌دهد.
-
-بنابراین برای Monitoring روی Terminal نیز بسیار سبک است.
-
----
-
-# بررسی Incidentهای گذشته
-
-مهم‌ترین قابلیت ابزار همین بخش است.
-
-مثلاً برای مشاهده Incidentهای 7 روز گذشته:
-
-```bash
-xraymon events 168
-```
-
-عدد `168` تعداد ساعت است:
-
-```text
-168 hours = 7 days
-```
-
-نمونه:
-
-```text
-ID  START                END                  PEAK CPU  PEAK USER     USER Mbps  TCP   IPs  STATUS
---  -------------------  -------------------  --------  ------------  ---------  ----  ---  ------
-7   2026-08-12 03:17:15  2026-08-12 03:24:00  386.4%   user_ali      412.81     12    1    ended
-6   2026-08-11 22:43:30  2026-08-11 22:45:00  227.7%   baduser         5.31    842    1    ended
-5   2026-08-11 18:02:15  2026-08-11 18:03:15  141.9%   reza           93.44      8    2    ended
-```
-
----
-
-# بررسی جزئیات یک Incident
-
-برای مثال Incident شماره 6:
-
-```bash
-xraymon show 6
-```
-
-نمونه:
-
-```text
-Event       : #6 (ended)
-Start       : 2026-08-11 22:43:30
-End         : 2026-08-11 22:45:00
-Peak time   : 2026-08-11 22:44:15
-Peak CPU    : 227.7%
-Total Mbps  : 126.32
-Peak user   : baduser
-User Mbps   : 5.31
-User TCP    : 842
-User IPs    : 1
-```
-
-سپس Sampleهای اطراف Peak CPU و کاربران فعال در همان لحظه نمایش داده می‌شوند.
-
-این دستور یکی از مهم‌ترین ابزارها برای Root Cause Analysis است.
-
----
-
-# سناریوی واقعی بعد از Reboot
-
-فرض کنید ساعت 03:20 Xray شدیداً CPU مصرف کرده و مجبور شده‌اید Node را Reboot کنید.
-
-بعد از بالا آمدن سرور:
-
-```bash
-xraymon events 24
-```
-
-Incident موردنظر را پیدا کنید.
-
-مثلاً:
-
-```text
-ID 12
-```
-
-سپس:
-
-```bash
-xraymon show 12
-```
-
-اطلاعات Incident قبل از Reboot از SQLite خوانده می‌شود.
-
-بنابراین Restart شدن Xray یا حتی Reboot کامل Node باعث از بین رفتن History قبلی نمی‌شود.
-
----
-
-# Top Users در گذشته
-
-نمایش کاربران پرترافیک 24 ساعت گذشته:
-
-```bash
-xraymon top 24
-```
-
-نمونه:
-
-```text
-USER          PEAK Mbps   AVG* Mbps   MAX TCP   MAX IPs   TOP SAMPLES
-------------  ----------  ----------  --------  --------  -----------
-ali              420.72      188.31        15         2          120
-baduser            8.31        4.11      1284         1           42
-reza              181.21       90.17        21         3           75
-```
-
-وجود Traffic پایین به معنی سالم بودن User نیست.
-
-مثلاً:
-
-```text
-baduser
-Peak Traffic = 8 Mbps
-MAX TCP      = 1284
-```
-
-می‌تواند بسیار مشکوک‌تر از کاربری باشد که با 400 Mbps فقط چند Connection پایدار دارد.
-
----
-
-# بررسی یک Username مشخص
-
-مثلاً بررسی User به نام:
-
-```text
-baduser
-```
-
-در 48 ساعت گذشته:
-
-```bash
-xraymon user baduser 48
-```
-
-نمایش داده می‌شود:
-
-- Peak Traffic
-- Max TCP Connections
-- Max Online IPs
-- تعداد Sampleهای ذخیره‌شده
-- History اخیر User
-
----
-
-# بررسی حجم Database
-
-```bash
-xraymon size
-```
-
-نمونه:
-
-```text
-/var/lib/xray-user-monitor/history.db: 4.20 MiB
-/var/lib/xray-user-monitor/history.db-wal: 0.31 MiB
-/var/lib/xray-user-monitor/history.db-shm: 0.03 MiB
-Total: 4.54 MiB
-```
-
----
-
-# Config
-
-فایل Config:
-
-```text
-/etc/xray-user-monitor.conf
-```
-
-مقادیر پیش‌فرض:
-
-```ini
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Xray / Marzban Node historical user load monitor
+# Target: Debian/Ubuntu Linux with systemd
+# Installs a lightweight background monitor backed by SQLite.
+
+APP_DIR="/opt/xray-user-monitor"
+DATA_DIR="/var/lib/xray-user-monitor"
+CONF_FILE="/etc/xray-user-monitor.conf"
+SERVICE_FILE="/etc/systemd/system/xray-user-monitor.service"
+GRPCURL_VERSION="1.9.3"
+
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "ERROR: Run this installer as root." >&2
+  exit 1
+fi
+
+install_pkgs_if_missing() {
+  local missing=()
+  command -v python3 >/dev/null 2>&1 || missing+=(python3)
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v ss >/dev/null 2>&1 || missing+=(iproute2)
+  [[ -f /etc/ssl/certs/ca-certificates.crt ]] || missing+=(ca-certificates)
+
+  if ((${#missing[@]})); then
+    echo "Installing required packages: ${missing[*]}"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+  fi
+}
+
+install_grpcurl() {
+  if command -v grpcurl >/dev/null 2>&1; then
+    echo "grpcurl already installed: $(grpcurl --version 2>/dev/null || true)"
+    return
+  fi
+
+  local arch deb tmp checksum_file
+  case "$(dpkg --print-architecture 2>/dev/null || uname -m)" in
+    amd64|x86_64) arch="amd64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *)
+      echo "ERROR: Unsupported architecture for automatic grpcurl install." >&2
+      echo "Install grpcurl manually, then run this installer again." >&2
+      exit 1
+      ;;
+  esac
+
+  deb="grpcurl_${GRPCURL_VERSION}_linux_${arch}.deb"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+
+  echo "Installing grpcurl v${GRPCURL_VERSION} (${arch})..."
+  curl -fL --retry 3 --connect-timeout 10 \
+    "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/${deb}" \
+    -o "$tmp/$deb"
+  curl -fL --retry 3 --connect-timeout 10 \
+    "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_checksums.txt" \
+    -o "$tmp/checksums.txt"
+
+  (
+    cd "$tmp"
+    grep "  ${deb}$" checksums.txt | sha256sum -c -
+  )
+
+  dpkg -i "$tmp/$deb"
+  rm -rf "$tmp"
+  trap - RETURN
+}
+
+install_pkgs_if_missing
+install_grpcurl
+
+mkdir -p "$APP_DIR" "$DATA_DIR"
+chmod 0755 "$APP_DIR"
+chmod 0700 "$DATA_DIR"
+
+cat > "$APP_DIR/command.proto" <<'PROTO'
+syntax = "proto3";
+package xray.app.stats.command;
+
+message Stat {
+  string name = 1;
+  int64 value = 2;
+}
+
+message QueryStatsRequest {
+  string pattern = 1;
+  bool reset = 2;
+}
+
+message QueryStatsResponse {
+  repeated Stat stat = 1;
+}
+
+message OnlineIPEntry {
+  string ip = 1;
+  int64 last_seen = 2;
+}
+
+message TrafficUserStat {
+  int64 uplink = 1;
+  int64 downlink = 2;
+}
+
+message UserStat {
+  string email = 1;
+  repeated OnlineIPEntry ips = 2;
+  TrafficUserStat traffic = 3;
+}
+
+message GetUsersStatsRequest {
+  bool include_traffic = 1;
+  bool reset = 2;
+}
+
+message GetUsersStatsResponse {
+  repeated UserStat users = 1;
+}
+
+service StatsService {
+  rpc QueryStats(QueryStatsRequest) returns (QueryStatsResponse) {}
+  rpc GetUsersStats(GetUsersStatsRequest) returns (GetUsersStatsResponse) {}
+}
+PROTO
+
+cat > "$APP_DIR/monitor.py" <<'PY'
+#!/usr/bin/env python3
+import ipaddress
+import json
+import math
+import os
+import re
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+APP_DIR = Path("/opt/xray-user-monitor")
+DATA_DIR = Path("/var/lib/xray-user-monitor")
+DB_PATH = DATA_DIR / "history.db"
+EVENT_LOG = DATA_DIR / "events.log"
+PROTO = APP_DIR / "command.proto"
+GRPCURL = "/usr/bin/grpcurl" if Path("/usr/bin/grpcurl").exists() else "grpcurl"
+
+API_HOST = os.getenv("XRAY_API_HOST", "127.0.0.1")
+API_PORT = int(os.getenv("XRAY_API_PORT", "62051"))
+SAMPLE_INTERVAL = max(5, int(os.getenv("SAMPLE_INTERVAL", "15")))
+CPU_EVENT_THRESHOLD = max(1.0, float(os.getenv("CPU_EVENT_THRESHOLD", "100")))
+CPU_CLEAR_THRESHOLD = max(0.0, float(os.getenv("CPU_CLEAR_THRESHOLD", "70")))
+EVENT_CLEAR_SAMPLES = max(1, int(os.getenv("EVENT_CLEAR_SAMPLES", "3")))
+TOP_USERS = max(3, int(os.getenv("TOP_USERS", "10")))
+RETENTION_DAYS = max(1, int(os.getenv("RETENTION_DAYS", "30")))
+DEEP_SCAN = os.getenv("DEEP_SCAN_ON_HIGH_CPU", "1").strip().lower() not in {"0", "false", "no"}
+RPC_TIMEOUT = max(1, int(os.getenv("RPC_TIMEOUT", "4")))
+
+CLK_TCK = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+STOP = False
+
+
+def log(msg):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def breadcrumb(msg):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(EVENT_LOG, "a", encoding="utf-8") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def handle_signal(signum, frame):
+    global STOP
+    STOP = True
+
+
+signal.signal(signal.SIGTERM, handle_signal)
+signal.signal(signal.SIGINT, handle_signal)
+
+
+def db_open():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS samples (
+            ts INTEGER PRIMARY KEY,
+            pid INTEGER,
+            cpu_pct REAL NOT NULL DEFAULT 0,
+            rss_mb REAL NOT NULL DEFAULT 0,
+            threads INTEGER NOT NULL DEFAULT 0,
+            total_mbps REAL NOT NULL DEFAULT 0,
+            up_mbps REAL NOT NULL DEFAULT 0,
+            down_mbps REAL NOT NULL DEFAULT 0,
+            top_user TEXT,
+            top_user_mbps REAL NOT NULL DEFAULT 0,
+            active_users INTEGER NOT NULL DEFAULT 0,
+            api_ok INTEGER NOT NULL DEFAULT 0,
+            api_mode TEXT,
+            event_id INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS user_samples (
+            ts INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            email TEXT NOT NULL,
+            up_mbps REAL NOT NULL DEFAULT 0,
+            down_mbps REAL NOT NULL DEFAULT 0,
+            total_mbps REAL NOT NULL DEFAULT 0,
+            online_ips INTEGER NOT NULL DEFAULT 0,
+            tcp_conn INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (ts, email)
+        ) WITHOUT ROWID;
+
+        CREATE INDEX IF NOT EXISTS idx_user_samples_username_ts
+            ON user_samples(username, ts);
+
+        CREATE INDEX IF NOT EXISTS idx_user_samples_ts
+            ON user_samples(ts);
+
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_ts INTEGER NOT NULL,
+            end_ts INTEGER,
+            peak_ts INTEGER NOT NULL,
+            peak_cpu_pct REAL NOT NULL,
+            peak_total_mbps REAL NOT NULL DEFAULT 0,
+            peak_user TEXT,
+            peak_user_mbps REAL NOT NULL DEFAULT 0,
+            peak_user_tcp_conn INTEGER NOT NULL DEFAULT 0,
+            peak_user_online_ips INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_events_start_ts ON events(start_ts);
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def clean_stale_event(conn):
+    row = conn.execute(
+        "SELECT id, start_ts FROM events WHERE status='active' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        last_ts = conn.execute("SELECT MAX(ts) FROM samples").fetchone()[0]
+        conn.execute(
+            "UPDATE events SET end_ts=?, status='interrupted' WHERE id=?",
+            (last_ts or row[1], row[0]),
+        )
+        conn.commit()
+
+
+def find_xray_pid():
+    candidates = []
+    proc = Path("/proc")
+    try:
+        entries = proc.iterdir()
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            comm = (entry / "comm").read_text(errors="ignore").strip()
+            if comm != "xray":
+                continue
+            stat = read_proc_stat(int(entry.name))
+            if stat:
+                candidates.append((stat["starttime"], int(entry.name)))
+        except (OSError, ValueError):
+            continue
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def read_proc_stat(pid):
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        rparen = raw.rfind(")")
+        if rparen < 0:
+            return None
+        fields = raw[rparen + 2 :].split()
+        # fields[0] == original field 3 (state)
+        utime = int(fields[11])
+        stime = int(fields[12])
+        threads = int(fields[17])
+        starttime = int(fields[19])
+
+        statm = Path(f"/proc/{pid}/statm").read_text().split()
+        rss_pages = int(statm[1]) if len(statm) > 1 else 0
+        rss_mb = rss_pages * PAGE_SIZE / (1024 * 1024)
+        return {
+            "ticks": utime + stime,
+            "threads": threads,
+            "starttime": starttime,
+            "rss_mb": rss_mb,
+        }
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def normalize_ip(value):
+    if not value:
+        return None
+    value = value.strip().strip("[]")
+    try:
+        ip = ipaddress.ip_address(value)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            return str(ip.ipv4_mapped)
+        return str(ip)
+    except ValueError:
+        return value
+
+
+def username_from_email(email):
+    # Marzban normally uses: <numeric-user-id>.<username>
+    m = re.match(r"^\d+\.(.+)$", email or "")
+    return m.group(1) if m else (email or "unknown")
+
+
+def grpc_call(method, payload):
+    cmd = [
+        GRPCURL,
+        "-insecure",
+        "-max-time",
+        str(RPC_TIMEOUT),
+        "-import-path",
+        str(APP_DIR),
+        "-proto",
+        PROTO.name,
+        "-d",
+        json.dumps(payload, separators=(",", ":")),
+        f"{API_HOST}:{API_PORT}",
+        f"xray.app.stats.command.StatsService/{method}",
+    ]
+    cp = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=RPC_TIMEOUT + 2,
+    )
+    if cp.returncode != 0:
+        raise RuntimeError(cp.stderr.strip() or f"grpcurl exit={cp.returncode}")
+    return json.loads(cp.stdout or "{}")
+
+
+def query_traffic_stats():
+    # QueryStats is the authoritative cumulative per-user traffic source and
+    # includes counters even when a user is no longer in the online-IP map.
+    data = grpc_call("QueryStats", {"pattern": "user>>>", "reset": False})
+    result = {}
+    for item in data.get("stat", []) or []:
+        name = item.get("name") or ""
+        m = re.match(r"^user>>>(.*?)>>>traffic>>>(uplink|downlink)$", name)
+        if not m:
+            continue
+        email, direction = m.groups()
+        row = result.setdefault(email, {"up": 0, "down": 0, "ips": set()})
+        row["up" if direction == "uplink" else "down"] = int(item.get("value") or 0)
+    return result
+
+
+def query_online_ips():
+    # Newer Xray builds expose GetUsersStats. It is based on online maps, so we
+    # use it only as an incident-time enrichment source, never as traffic truth.
+    data = grpc_call("GetUsersStats", {"includeTraffic": False, "reset": False})
+    result = {}
+    for u in data.get("users", []) or []:
+        email = u.get("email") or ""
+        if not email:
+            continue
+        ips = set()
+        for item in (u.get("ips") or []):
+            ip = normalize_ip(item.get("ip") if isinstance(item, dict) else None)
+            if ip:
+                ips.add(ip)
+        if ips:
+            result[email] = ips
+    return result
+
+
+def peer_ip_from_ss_token(token):
+    token = token.strip()
+    if token.startswith("[") and "]" in token:
+        return normalize_ip(token[1 : token.rfind("]")])
+    if ":" in token:
+        host = token.rsplit(":", 1)[0]
+        return normalize_ip(host)
+    return normalize_ip(token)
+
+
+def tcp_connections_by_user(pid, stats):
+    if not stats or not any(v.get("ips") for v in stats.values()):
+        return {}
+
+    ip_owners = {}
+    for email, row in stats.items():
+        for ip in row.get("ips", set()):
+            ip_owners.setdefault(ip, set()).add(email)
+
+    try:
+        cp = subprocess.run(
+            ["ss", "-Htnp", "state", "established"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return {}
+
+    peer_counts = {}
+    pid_marker = f"pid={pid},"
+    for line in cp.stdout.splitlines():
+        if pid_marker not in line:
+            continue
+        parts = line.split()
+        # With `ss -Htnp state established`, the last endpoint before process
+        # metadata is the peer endpoint. Locate process metadata, then step back.
+        proc_idx = None
+        for i, token in enumerate(parts):
+            if "users:((" in token or token.startswith("users:("):
+                proc_idx = i
+                break
+        if proc_idx is None or proc_idx < 1:
+            # Fallback for common ss column layout.
+            if len(parts) >= 5:
+                peer_token = parts[4]
+            else:
+                continue
+        else:
+            peer_token = parts[proc_idx - 1]
+        ip = peer_ip_from_ss_token(peer_token)
+        if ip:
+            peer_counts[ip] = peer_counts.get(ip, 0) + 1
+
+    by_user = {}
+    for ip, count in peer_counts.items():
+        owners = ip_owners.get(ip, set())
+        # Only attribute when the IP maps uniquely to one Xray user.
+        if len(owners) == 1:
+            email = next(iter(owners))
+            by_user[email] = by_user.get(email, 0) + count
+    return by_user
+
+
+def bytes_delta(current, previous):
+    if previous is None or current < previous:
+        return 0
+    return current - previous
+
+
+def cleanup(conn, now_ts):
+    cutoff = now_ts - RETENTION_DAYS * 86400
+    with conn:
+        conn.execute("DELETE FROM user_samples WHERE ts < ?", (cutoff,))
+        conn.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+        conn.execute(
+            "DELETE FROM events WHERE COALESCE(end_ts, start_ts) < ? AND status != 'active'",
+            (cutoff,),
+        )
+    try:
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        conn.execute("PRAGMA incremental_vacuum(500)")
+    except sqlite3.DatabaseError:
+        pass
+
+
+def main():
+    conn = db_open()
+    clean_stale_event(conn)
+
+    last_pid = None
+    last_proc_ticks = None
+    last_proc_mono = None
+    previous_stats = None
+    last_stats_mono = None
+    api_mode = None
+    active_event = None
+    clear_count = 0
+    next_cleanup = time.time() + 3600
+    last_error_log = 0.0
+
+    log(
+        f"started: api={API_HOST}:{API_PORT}, interval={SAMPLE_INTERVAL}s, "
+        f"cpu_event={CPU_EVENT_THRESHOLD:.0f}%, retention={RETENTION_DAYS}d, top={TOP_USERS}"
+    )
+
+    while not STOP:
+        loop_started = time.monotonic()
+        now_ts = int(time.time())
+        pid = find_xray_pid()
+
+        if pid is None:
+            if time.time() - last_error_log > 60:
+                log("Xray process not found; waiting...")
+                last_error_log = time.time()
+            last_pid = None
+            last_proc_ticks = None
+            last_proc_mono = None
+            previous_stats = None
+            last_stats_mono = None
+            time.sleep(min(SAMPLE_INTERVAL, 5))
+            continue
+
+        proc = read_proc_stat(pid)
+        now_mono = time.monotonic()
+        cpu_pct = 0.0
+        rss_mb = 0.0
+        threads = 0
+
+        if proc:
+            rss_mb = proc["rss_mb"]
+            threads = proc["threads"]
+            if pid == last_pid and last_proc_ticks is not None and last_proc_mono is not None:
+                elapsed = now_mono - last_proc_mono
+                if elapsed > 0:
+                    cpu_pct = max(
+                        0.0,
+                        (proc["ticks"] - last_proc_ticks) / CLK_TCK / elapsed * 100.0,
+                    )
+            last_proc_ticks = proc["ticks"]
+            last_proc_mono = now_mono
+
+        if pid != last_pid:
+            previous_stats = None
+            last_stats_mono = None
+            if last_pid is not None:
+                log(f"Xray PID changed: {last_pid} -> {pid}; traffic baseline reset")
+            last_pid = pid
+
+        api_ok = 0
+        stats = {}
+        mode = "QueryStats"
+        try:
+            stats = query_traffic_stats()
+            api_mode = "QueryStats"
+            api_ok = 1
+        except Exception as exc:
+            if time.time() - last_error_log > 60:
+                log(f"Stats API error: {exc}")
+                last_error_log = time.time()
+
+        stats_now_mono = time.monotonic()
+        if last_stats_mono is None:
+            stats_elapsed = float(SAMPLE_INTERVAL)
+        else:
+            stats_elapsed = max(0.001, stats_now_mono - last_stats_mono)
+
+        user_rows = []
+        total_up_bps = 0.0
+        total_down_bps = 0.0
+        active_users = 0
+
+        if api_ok and previous_stats is not None:
+            for email, cur in stats.items():
+                prev = previous_stats.get(email)
+                if prev is None:
+                    continue
+                up_bytes = bytes_delta(cur.get("up", 0), prev.get("up", 0))
+                down_bytes = bytes_delta(cur.get("down", 0), prev.get("down", 0))
+                up_bps = up_bytes * 8.0 / stats_elapsed
+                down_bps = down_bytes * 8.0 / stats_elapsed
+                total_bps = up_bps + down_bps
+                if total_bps > 0:
+                    active_users += 1
+                total_up_bps += up_bps
+                total_down_bps += down_bps
+                user_rows.append(
+                    {
+                        "email": email,
+                        "username": username_from_email(email),
+                        "up_mbps": up_bps / 1_000_000.0,
+                        "down_mbps": down_bps / 1_000_000.0,
+                        "total_mbps": total_bps / 1_000_000.0,
+                        "online_ips": len(cur.get("ips") or set()),
+                        "tcp_conn": 0,
+                    }
+                )
+
+        if api_ok:
+            previous_stats = stats
+            last_stats_mono = stats_now_mono
+
+        total_mbps = (total_up_bps + total_down_bps) / 1_000_000.0
+        up_mbps = total_up_bps / 1_000_000.0
+        down_mbps = total_down_bps / 1_000_000.0
+
+        high_cpu = cpu_pct >= CPU_EVENT_THRESHOLD
+        conn_by_email = {}
+        if high_cpu and DEEP_SCAN and api_ok:
+            try:
+                online = query_online_ips()
+                for email, ips in online.items():
+                    if email in stats:
+                        stats[email]["ips"] = ips
+                    else:
+                        stats[email] = {"up": 0, "down": 0, "ips": ips}
+                mode = "QueryStats+OnlineIPs"
+                conn_by_email = tcp_connections_by_user(pid, stats)
+            except Exception:
+                # Older Xray versions or configs without online maps simply
+                # continue with traffic-only attribution.
+                conn_by_email = {}
+
+            by_email = {r["email"]: r for r in user_rows}
+            for email, cur in stats.items():
+                if not cur.get("ips") and email not in conn_by_email:
+                    continue
+                row = by_email.get(email)
+                if row is None:
+                    row = {
+                        "email": email,
+                        "username": username_from_email(email),
+                        "up_mbps": 0.0,
+                        "down_mbps": 0.0,
+                        "total_mbps": 0.0,
+                        "online_ips": len(cur.get("ips") or set()),
+                        "tcp_conn": 0,
+                    }
+                    user_rows.append(row)
+                    by_email[email] = row
+                else:
+                    row["online_ips"] = len(cur.get("ips") or set())
+                row["tcp_conn"] = conn_by_email.get(email, 0)
+
+        traffic_sorted = sorted(user_rows, key=lambda r: r["total_mbps"], reverse=True)
+        conn_sorted = sorted(user_rows, key=lambda r: r["tcp_conn"], reverse=True)
+        top_row = traffic_sorted[0] if traffic_sorted else None
+
+        selected = {}
+        for row in traffic_sorted[:TOP_USERS]:
+            if row["total_mbps"] > 0 or high_cpu:
+                selected[row["email"]] = row
+        if high_cpu:
+            for row in conn_sorted[:TOP_USERS]:
+                if row["tcp_conn"] > 0:
+                    selected[row["email"]] = row
+
+        # Event state machine with hysteresis.
+        new_event_started = False
+        event_ended = False
+        if active_event is None and high_cpu:
+            cur = conn.execute(
+                """
+                INSERT INTO events(
+                    start_ts, peak_ts, peak_cpu_pct, peak_total_mbps,
+                    peak_user, peak_user_mbps, peak_user_tcp_conn,
+                    peak_user_online_ips, status
+                ) VALUES(?,?,?,?,?,?,?,?, 'active')
+                """,
+                (
+                    now_ts,
+                    now_ts,
+                    cpu_pct,
+                    total_mbps,
+                    top_row["username"] if top_row else None,
+                    top_row["total_mbps"] if top_row else 0.0,
+                    top_row["tcp_conn"] if top_row else 0,
+                    top_row["online_ips"] if top_row else 0,
+                ),
+            )
+            active_event = cur.lastrowid
+            clear_count = 0
+            new_event_started = True
+        elif active_event is not None:
+            if high_cpu:
+                clear_count = 0
+            elif cpu_pct < CPU_CLEAR_THRESHOLD:
+                clear_count += 1
+            else:
+                clear_count = 0
+
+            event_peak = conn.execute(
+                "SELECT peak_cpu_pct FROM events WHERE id=?", (active_event,)
+            ).fetchone()
+            if event_peak and cpu_pct > float(event_peak[0]):
+                conn.execute(
+                    """
+                    UPDATE events
+                    SET peak_ts=?, peak_cpu_pct=?, peak_total_mbps=?,
+                        peak_user=?, peak_user_mbps=?, peak_user_tcp_conn=?,
+                        peak_user_online_ips=?
+                    WHERE id=?
+                    """,
+                    (
+                        now_ts,
+                        cpu_pct,
+                        total_mbps,
+                        top_row["username"] if top_row else None,
+                        top_row["total_mbps"] if top_row else 0.0,
+                        top_row["tcp_conn"] if top_row else 0,
+                        top_row["online_ips"] if top_row else 0,
+                        active_event,
+                    ),
+                )
+
+            if clear_count >= EVENT_CLEAR_SAMPLES:
+                conn.execute(
+                    "UPDATE events SET end_ts=?, status='ended' WHERE id=?",
+                    (now_ts, active_event),
+                )
+                event_ended = True
+
+        sample_event_id = active_event
+
+        with conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO samples(
+                    ts,pid,cpu_pct,rss_mb,threads,total_mbps,up_mbps,down_mbps,
+                    top_user,top_user_mbps,active_users,api_ok,api_mode,event_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    now_ts,
+                    pid,
+                    cpu_pct,
+                    rss_mb,
+                    threads,
+                    total_mbps,
+                    up_mbps,
+                    down_mbps,
+                    top_row["username"] if top_row else None,
+                    top_row["total_mbps"] if top_row else 0.0,
+                    active_users,
+                    api_ok,
+                    mode,
+                    sample_event_id,
+                ),
+            )
+            for row in selected.values():
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO user_samples(
+                        ts,username,email,up_mbps,down_mbps,total_mbps,online_ips,tcp_conn
+                    ) VALUES(?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        now_ts,
+                        row["username"],
+                        row["email"],
+                        row["up_mbps"],
+                        row["down_mbps"],
+                        row["total_mbps"],
+                        row["online_ips"],
+                        row["tcp_conn"],
+                    ),
+                )
+
+        if new_event_started:
+            breadcrumb(
+                f"EVENT_START id={active_event} cpu={cpu_pct:.1f}% "
+                f"top_user={(top_row['username'] if top_row else '-')} "
+                f"top_mbps={(top_row['total_mbps'] if top_row else 0):.2f}"
+            )
+            log(
+                f"HIGH CPU event #{active_event} started: cpu={cpu_pct:.1f}% "
+                f"top={(top_row['username'] if top_row else '-')} "
+                f"{(top_row['total_mbps'] if top_row else 0):.2f} Mbps"
+            )
+
+        if event_ended:
+            breadcrumb(f"EVENT_END id={active_event} cpu={cpu_pct:.1f}%")
+            log(f"HIGH CPU event #{active_event} ended")
+            active_event = None
+            clear_count = 0
+
+        if time.time() >= next_cleanup:
+            cleanup(conn, now_ts)
+            next_cleanup = time.time() + 86400
+
+        elapsed_loop = time.monotonic() - loop_started
+        sleep_for = max(0.2, SAMPLE_INTERVAL - elapsed_loop)
+        end = time.monotonic() + sleep_for
+        while not STOP:
+            remain = end - time.monotonic()
+            if remain <= 0:
+                break
+            time.sleep(min(1.0, remain))
+
+    if active_event is not None:
+        now_ts = int(time.time())
+        with conn:
+            conn.execute(
+                "UPDATE events SET end_ts=?, status='service-stopped' WHERE id=?",
+                (now_ts, active_event),
+            )
+        breadcrumb(f"EVENT_STOP id={active_event} reason=service-stopped")
+    conn.close()
+    log("stopped")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        log(f"FATAL: {exc}")
+        raise
+PY
+
+cat > "$APP_DIR/report.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import sqlite3
+import sys
+from datetime import datetime
+from pathlib import Path
+
+DB = Path("/var/lib/xray-user-monitor/history.db")
+
+
+def fmt_ts(ts):
+    if not ts:
+        return "-"
+    return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def db():
+    if not DB.exists():
+        print("No history database yet.")
+        sys.exit(1)
+    return sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+
+
+def print_table(headers, rows):
+    rows = [["" if v is None else str(v) for v in r] for r in rows]
+    widths = [len(h) for h in headers]
+    for r in rows:
+        for i, v in enumerate(r):
+            widths[i] = max(widths[i], len(v))
+    fmt = "  ".join("{:<" + str(w) + "}" for w in widths)
+    print(fmt.format(*headers))
+    print(fmt.format(*["-" * w for w in widths]))
+    for r in rows:
+        print(fmt.format(*r))
+
+
+def cmd_status(conn):
+    s = conn.execute(
+        """
+        SELECT ts,pid,cpu_pct,rss_mb,threads,total_mbps,up_mbps,down_mbps,
+               top_user,top_user_mbps,active_users,api_ok,api_mode,event_id
+        FROM samples ORDER BY ts DESC LIMIT 1
+        """
+    ).fetchone()
+    if not s:
+        print("No samples yet.")
+        return
+    print(f"Time        : {fmt_ts(s[0])}")
+    print(f"Xray PID    : {s[1]}")
+    print(f"Xray CPU    : {s[2]:.1f}%  (100% = one fully used CPU core)")
+    print(f"Xray RAM    : {s[3]:.1f} MiB")
+    print(f"Threads     : {s[4]}")
+    print(f"User traffic: {s[5]:.2f} Mbps  UP={s[6]:.2f}  DOWN={s[7]:.2f}")
+    print(f"Top user    : {s[8] or '-'}  {s[9]:.2f} Mbps")
+    print(f"Active users: {s[10]}")
+    print(f"Stats API   : {'OK' if s[11] else 'ERROR'} ({s[12] or '-'})")
+    print(f"Event       : {s[13] or '-'}")
+    users = conn.execute(
+        """
+        SELECT username,total_mbps,up_mbps,down_mbps,online_ips,tcp_conn
+        FROM user_samples WHERE ts=?
+        ORDER BY total_mbps DESC, tcp_conn DESC LIMIT 15
+        """,
+        (s[0],),
+    ).fetchall()
+    if users:
+        print("\nTop users in this sample:")
+        print_table(
+            ["USER", "Mbps", "UP", "DOWN", "IPs", "TCP"],
+            [
+                [u[0], f"{u[1]:.2f}", f"{u[2]:.2f}", f"{u[3]:.2f}", u[4], u[5]]
+                for u in users
+            ],
+        )
+
+
+def cmd_events(conn, hours):
+    cutoff = int(datetime.now().timestamp()) - int(hours * 3600)
+    rows = conn.execute(
+        """
+        SELECT id,start_ts,end_ts,peak_ts,peak_cpu_pct,peak_total_mbps,
+               peak_user,peak_user_mbps,peak_user_tcp_conn,
+               peak_user_online_ips,status
+        FROM events WHERE start_ts>=? ORDER BY start_ts DESC LIMIT 100
+        """,
+        (cutoff,),
+    ).fetchall()
+    print_table(
+        ["ID", "START", "END", "PEAK CPU", "PEAK USER", "USER Mbps", "TCP", "IPs", "STATUS"],
+        [
+            [
+                r[0], fmt_ts(r[1]), fmt_ts(r[2]), f"{r[4]:.1f}%",
+                r[6] or "-", f"{r[7]:.2f}", r[8], r[9], r[10]
+            ]
+            for r in rows
+        ],
+    )
+
+
+def cmd_top(conn, hours):
+    cutoff = int(datetime.now().timestamp()) - int(hours * 3600)
+    rows = conn.execute(
+        """
+        SELECT username,
+               MAX(total_mbps) AS peak_mbps,
+               AVG(total_mbps) AS avg_when_recorded,
+               MAX(tcp_conn) AS max_tcp,
+               MAX(online_ips) AS max_ips,
+               COUNT(*) AS appearances
+        FROM user_samples
+        WHERE ts>=?
+        GROUP BY username
+        ORDER BY peak_mbps DESC, max_tcp DESC
+        LIMIT 50
+        """,
+        (cutoff,),
+    ).fetchall()
+    print_table(
+        ["USER", "PEAK Mbps", "AVG* Mbps", "MAX TCP", "MAX IPs", "TOP SAMPLES"],
+        [
+            [r[0], f"{r[1]:.2f}", f"{r[2]:.2f}", r[3], r[4], r[5]]
+            for r in rows
+        ],
+    )
+    print("\n* AVG is only across samples where the user was retained in the Top-N history.")
+
+
+def cmd_user(conn, username, hours):
+    cutoff = int(datetime.now().timestamp()) - int(hours * 3600)
+    summary = conn.execute(
+        """
+        SELECT MAX(total_mbps),AVG(total_mbps),MAX(tcp_conn),MAX(online_ips),COUNT(*)
+        FROM user_samples WHERE username=? AND ts>=?
+        """,
+        (username, cutoff),
+    ).fetchone()
+    if not summary or summary[4] == 0:
+        print("No retained samples for this user in the requested window.")
+        return
+    print(f"User        : {username}")
+    print(f"Peak traffic: {summary[0]:.2f} Mbps")
+    print(f"Max TCP     : {summary[2]}")
+    print(f"Max IPs     : {summary[3]}")
+    print(f"Samples     : {summary[4]}")
+    rows = conn.execute(
+        """
+        SELECT ts,total_mbps,up_mbps,down_mbps,online_ips,tcp_conn
+        FROM user_samples WHERE username=? AND ts>=?
+        ORDER BY ts DESC LIMIT 50
+        """,
+        (username, cutoff),
+    ).fetchall()
+    print("\nLatest retained samples:")
+    print_table(
+        ["TIME", "Mbps", "UP", "DOWN", "IPs", "TCP"],
+        [
+            [fmt_ts(r[0]), f"{r[1]:.2f}", f"{r[2]:.2f}", f"{r[3]:.2f}", r[4], r[5]]
+            for r in rows
+        ],
+    )
+
+
+def cmd_show(conn, event_id):
+    e = conn.execute(
+        """
+        SELECT id,start_ts,end_ts,peak_ts,peak_cpu_pct,peak_total_mbps,
+               peak_user,peak_user_mbps,peak_user_tcp_conn,
+               peak_user_online_ips,status
+        FROM events WHERE id=?
+        """,
+        (event_id,),
+    ).fetchone()
+    if not e:
+        print("Event not found.")
+        return
+    print(f"Event       : #{e[0]} ({e[10]})")
+    print(f"Start       : {fmt_ts(e[1])}")
+    print(f"End         : {fmt_ts(e[2])}")
+    print(f"Peak time   : {fmt_ts(e[3])}")
+    print(f"Peak CPU    : {e[4]:.1f}%")
+    print(f"Total Mbps  : {e[5]:.2f}")
+    print(f"Peak user   : {e[6] or '-'}")
+    print(f"User Mbps   : {e[7]:.2f}")
+    print(f"User TCP    : {e[8]}")
+    print(f"User IPs    : {e[9]}")
+
+    rows = conn.execute(
+        """
+        SELECT ts,cpu_pct,rss_mb,total_mbps,top_user,top_user_mbps,active_users,api_mode
+        FROM samples
+        WHERE ts BETWEEN ? AND ?
+        ORDER BY ABS(ts-?) ASC LIMIT 15
+        """,
+        (e[3] - 120, e[3] + 120, e[3]),
+    ).fetchall()
+    rows.sort(key=lambda r: r[0])
+    if rows:
+        print("\nSamples around peak:")
+        print_table(
+            ["TIME", "CPU", "RAM", "TOTAL Mbps", "TOP USER", "USER Mbps", "ACTIVE", "API"],
+            [
+                [fmt_ts(r[0]), f"{r[1]:.1f}%", f"{r[2]:.0f}M", f"{r[3]:.2f}", r[4] or "-", f"{r[5]:.2f}", r[6], r[7] or "-"]
+                for r in rows
+            ],
+        )
+
+    users = conn.execute(
+        """
+        SELECT username,total_mbps,up_mbps,down_mbps,online_ips,tcp_conn
+        FROM user_samples WHERE ts=?
+        ORDER BY tcp_conn DESC,total_mbps DESC LIMIT 30
+        """,
+        (e[3],),
+    ).fetchall()
+    if users:
+        print("\nUsers at the CPU peak:")
+        print_table(
+            ["USER", "Mbps", "UP", "DOWN", "IPs", "TCP"],
+            [[r[0], f"{r[1]:.2f}", f"{r[2]:.2f}", f"{r[3]:.2f}", r[4], r[5]] for r in users],
+        )
+
+
+def cmd_size(conn):
+    conn.close()
+    files = [DB, Path(str(DB) + "-wal"), Path(str(DB) + "-shm")]
+    total = 0
+    for p in files:
+        if p.exists():
+            size = p.stat().st_size
+            total += size
+            print(f"{p}: {size / (1024*1024):.2f} MiB")
+    print(f"Total: {total / (1024*1024):.2f} MiB")
+
+
+def usage():
+    print("""Usage:
+  xraymon status
+  xraymon events [hours]          # default: 168 (7 days)
+  xraymon show <event-id>
+  xraymon top [hours]             # default: 24
+  xraymon user <username> [hours] # default: 24
+  xraymon size
+
+Examples:
+  xraymon status
+  xraymon events 168
+  xraymon show 3
+  xraymon top 24
+  xraymon user ali 48
+  watch -n 5 xraymon status
+""")
+
+
+def main():
+    if len(sys.argv) < 2:
+        usage()
+        return 1
+    command = sys.argv[1].lower()
+    conn = db()
+    if command == "status":
+        cmd_status(conn)
+    elif command == "events":
+        cmd_events(conn, float(sys.argv[2]) if len(sys.argv) > 2 else 168)
+    elif command == "show" and len(sys.argv) > 2:
+        cmd_show(conn, int(sys.argv[2]))
+    elif command == "top":
+        cmd_top(conn, float(sys.argv[2]) if len(sys.argv) > 2 else 24)
+    elif command == "user" and len(sys.argv) > 2:
+        cmd_user(conn, sys.argv[2], float(sys.argv[3]) if len(sys.argv) > 3 else 24)
+    elif command == "size":
+        cmd_size(conn)
+        return 0
+    else:
+        usage()
+        return 1
+    conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+
+chmod 0755 "$APP_DIR/monitor.py" "$APP_DIR/report.py"
+ln -sf "$APP_DIR/report.py" /usr/local/bin/xraymon
+
+if [[ ! -f "$CONF_FILE" ]]; then
+cat > "$CONF_FILE" <<'CONF'
 # Marzban Node Xray API
 XRAY_API_HOST=127.0.0.1
 XRAY_API_PORT=62051
 
-# Poll interval
+# Poll interval. 15 seconds is a good balance between visibility and overhead.
 SAMPLE_INTERVAL=15
 
-# Xray process CPU
+# Xray CPU is process CPU: 100% means one CPU core fully utilized.
 CPU_EVENT_THRESHOLD=100
 CPU_CLEAR_THRESHOLD=70
 EVENT_CLEAR_SAMPLES=3
 
-# Number of busiest users retained per sample
+# Persist only the busiest users per sample to keep SQLite small.
 TOP_USERS=10
 
-# Automatic history retention
+# Automatic history retention.
 RETENTION_DAYS=30
 
-# Extra analysis only when CPU is high
+# When CPU is high and Xray supports GetUsersStats, correlate online client IPs
+# with Xray-owned established TCP sockets. This runs ONLY during high CPU.
 DEEP_SCAN_ON_HIGH_CPU=1
 
-# gRPC timeout
+# gRPC query timeout in seconds.
 RPC_TIMEOUT=4
-```
-
-بعد از تغییر Config:
-
-```bash
-systemctl restart xray-user-monitor
-```
-
----
-
-# SAMPLE_INTERVAL
-
-پیش‌فرض:
-
-```ini
-SAMPLE_INTERVAL=15
-```
-
-یعنی هر 15 ثانیه یک Sample.
-
-برای بیشتر سرورها این مقدار تعادل خوبی بین Resolution و Overhead است.
-
-مقادیر پیشنهادی:
-
-```text
-10 sec    High-resolution monitoring
-15 sec    Recommended
-30 sec    Very low overhead
-60 sec    Long-term coarse monitoring
-```
-
-برای تشخیص Spikeهای کوتاه، `15` ثانیه پیشنهاد می‌شود.
-
----
-
-# CPU_EVENT_THRESHOLD
-
-پیش‌فرض:
-
-```ini
-CPU_EVENT_THRESHOLD=100
-```
-
-CPU در این ابزار CPU خود Process Xray است.
-
-بنابراین:
-
-```text
-100% ≈ یک CPU Core کاملاً درگیر
-200% ≈ دو Core
-300% ≈ سه Core
-400% ≈ چهار Core
-```
-
-اگر سرور 4 Core دارد و Xray هنگام مشکل به حدود `300%` یا `400%` می‌رسد، Threshold برابر `100` مناسب است و Incident را خیلی زود ثبت می‌کند.
-
-اگر Xray در حالت عادی نزدیک 100% فعالیت دارد، می‌توانید Threshold را مثلاً افزایش دهید:
-
-```ini
-CPU_EVENT_THRESHOLD=150
-```
-
-یا:
-
-```ini
-CPU_EVENT_THRESHOLD=200
-```
-
----
-
-# CPU_CLEAR_THRESHOLD
-
-پیش‌فرض:
-
-```ini
-CPU_CLEAR_THRESHOLD=70
-```
-
-Incident بلافاصله بعد از افت CPU بسته نمی‌شود.
-
-برای جلوگیری از باز و بسته شدن سریع Event، CPU باید چند Sample متوالی زیر Clear Threshold باشد.
-
-تعداد Sampleها:
-
-```ini
-EVENT_CLEAR_SAMPLES=3
-```
-
-با Interval پیش‌فرض 15 ثانیه:
-
-```text
-3 × 15 sec = 45 seconds
-```
-
-یعنی CPU تقریباً 45 ثانیه باید پایین بماند تا Incident بسته شود.
-
-این روش Hysteresis از ایجاد Eventهای بسیار زیاد و تکه‌تکه جلوگیری می‌کند.
-
----
-
-# TOP_USERS
-
-پیش‌فرض:
-
-```ini
-TOP_USERS=10
-```
-
-برای هر Sample همه کاربران داخل Database ذخیره نمی‌شوند.
-
-فقط کاربران پرترافیک ذخیره می‌شوند.
-
-هنگام High CPU، کاربران دارای Connection زیاد نیز به مجموعه ذخیره‌شده اضافه می‌شوند.
-
-این کار باعث می‌شود Database حتی روی Nodeهای شلوغ کوچک بماند.
-
-در صورت نیاز:
-
-```ini
-TOP_USERS=20
-```
-
-ولی برای بیشتر Nodeها مقدار `10` کافی است.
-
----
-
-# RETENTION_DAYS
-
-پیش‌فرض:
-
-```ini
-RETENTION_DAYS=30
-```
-
-Sampleهای قدیمی‌تر از 30 روز به‌صورت خودکار حذف می‌شوند.
-
-برای نگهداری 60 روز:
-
-```ini
-RETENTION_DAYS=60
-```
-
-برای 90 روز:
-
-```ini
-RETENTION_DAYS=90
-```
-
-هرچه Retention بیشتر باشد Database بزرگ‌تر خواهد شد.
-
----
-
-# Deep Scan
-
-پیش‌فرض:
-
-```ini
-DEEP_SCAN_ON_HIGH_CPU=1
-```
-
-Deep Scan فقط زمانی اجرا می‌شود که:
-
-```text
-Xray CPU >= CPU_EVENT_THRESHOLD
-```
-
-در حالت معمول:
-
-```text
-ss
-GetUsersStats
-```
-
-به‌صورت مداوم اجرا نمی‌شوند.
-
-در زمان Incident، اگر نسخه Xray از `GetUsersStats` پشتیبانی کند:
-
-1. IPهای آنلاین Users دریافت می‌شوند.
-2. `ss` فقط همان لحظه اجرا می‌شود.
-3. Established TCP Connectionهای متعلق به Process Xray بررسی می‌شوند.
-4. در صورتی که یک IP فقط به یک User قابل انتساب باشد، تعداد Connection برای آن User ثبت می‌شود.
-
-این طراحی برای پایین نگه داشتن Overhead انتخاب شده است.
-
----
-
-# تفسیر نتایج
-
-## حالت اول: Traffic بسیار زیاد
-
-مثال:
-
-```text
-USER       Mbps     TCP
-ali        450       12
-```
-
-و همزمان:
-
-```text
-Xray CPU = 350%
-```
-
-این User یکی از مظنون‌های اصلی است.
-
----
-
-## حالت دوم: Traffic کم ولی Connection بسیار زیاد
-
-مثال:
-
-```text
-USER       Mbps     TCP
-baduser      6      1200
-```
-
-و همزمان:
-
-```text
-Xray CPU = 280%
-```
-
-این حالت حتی مشکوک‌تر است.
-
-ممکن است User باعث:
-
-- Connection churn
-- تعداد زیاد اتصال کوتاه
-- Burstهای Connection
-- درخواست‌های متعدد
-- رفتار غیرمعمول Client
-- استفاده سنگین از Transport
-- تعداد زیاد Session
-
-شده باشد.
-
----
-
-## حالت سوم: Traffic زیاد ولی CPU طبیعی
-
-مثال:
-
-```text
-USER       Mbps     TCP
-download   600        6
-```
-
-ولی:
-
-```text
-Xray CPU = 45%
-```
-
-این User صرفاً Traffic زیادی دارد و لزوماً عامل مشکل CPU نیست.
-
----
-
-# چرا Traffic به‌تنهایی کافی نیست؟
-
-یک User می‌تواند با یک Connection پایدار:
-
-```text
-500 Mbps
-```
-
-مصرف کند ولی فشار CPU زیادی ایجاد نکند.
-
-در مقابل User دیگری ممکن است:
-
-```text
-5 Mbps
-```
-
-داشته باشد ولی هزاران Connection کوتاه ایجاد کند.
-
-به همین دلیل Monitor چند پارامتر را کنار هم ذخیره می‌کند:
-
-```text
-CPU
-Traffic
-TCP Connections
-Online IPs
-Timestamp
-```
-
-و تصمیم باید از ترکیب آن‌ها گرفته شود.
-
----
-
-# نحوه محاسبه Traffic
-
-Xray Stats مقدار cumulative Counter را ارائه می‌دهد.
-
-Monitor Counter را Reset نمی‌کند.
-
-به‌جای آن:
-
-```text
-Traffic Rate =
-Current Counter - Previous Counter
-----------------------------------
-            Elapsed Time
-```
-
-محاسبه می‌شود.
-
-این روش باعث می‌شود Monitoring در Stats اصلی Xray دخالت نکند.
-
----
-
-# رفتار هنگام Restart شدن Xray
-
-اگر PID هسته Xray تغییر کند، Monitor متوجه می‌شود.
-
-مثلاً:
-
-```text
-Xray PID changed: 1212 -> 2441
-```
-
-در این شرایط Traffic Baseline Reset می‌شود تا اختلاف Counter قبلی و Process جدید باعث ایجاد Traffic اشتباه نشود.
-
-History قبلی همچنان در SQLite باقی می‌ماند.
-
----
-
-# رفتار هنگام Restart شدن Monitor
-
-اگر سرویس Monitor در حالی Restart شود که یک Incident باز بوده، Event قبلی با Status مناسب بسته می‌شود.
-
-Status ممکن است شامل مواردی مانند:
-
-```text
-ended
-interrupted
-service-stopped
-```
-
-باشد.
-
-بنابراین Event نیمه‌کاره بدون وضعیت مشخص باقی نمی‌ماند.
-
----
-
-# Database
-
-Database اصلی:
-
-```text
-/var/lib/xray-user-monitor/history.db
-```
-
-SQLite با تنظیمات سبک و مناسب Monitoring استفاده می‌شود:
-
-```text
-WAL
-synchronous=NORMAL
-temp_store=MEMORY
-busy_timeout
-incremental_vacuum
-```
-
-اطلاعات اصلی در سه بخش ذخیره می‌شود:
-
-```text
-samples
-user_samples
-events
-```
-
-### samples
-
-اطلاعات کلی Xray:
-
-```text
-Timestamp
-PID
-CPU
-RAM
-Threads
-Total Mbps
-Upload Mbps
-Download Mbps
-Top User
-Active Users
-API Status
-Event ID
-```
-
-### user_samples
-
-اطلاعات کاربران منتخب:
-
-```text
-Timestamp
-Username
-Xray Email
-Upload Mbps
-Download Mbps
-Total Mbps
-Online IPs
-TCP Connections
-```
-
-### events
-
-Incidentهای CPU:
-
-```text
-Start Time
-End Time
-Peak Time
-Peak CPU
-Peak Traffic
-Peak User
-Peak User Traffic
-Peak TCP Connections
-Peak Online IPs
-Status
-```
-
----
-
-# Event Log
-
-علاوه بر SQLite، Eventهای مهم در یک فایل کوچک نیز ثبت می‌شوند:
-
-```text
-/var/lib/xray-user-monitor/events.log
-```
-
-مشاهده:
-
-```bash
-cat /var/lib/xray-user-monitor/events.log
-```
-
-یا:
-
-```bash
-tail -f /var/lib/xray-user-monitor/events.log
-```
-
-نمونه:
-
-```text
-2026-08-11 22:43:30 EVENT_START id=6 cpu=227.7% top_user=baduser top_mbps=5.31
-2026-08-11 22:45:00 EVENT_END id=6 cpu=51.2%
-```
-
----
-
-# Log سرویس
-
-مشاهده آخرین Logها:
-
-```bash
-journalctl -u xray-user-monitor -n 100 --no-pager
-```
-
-نمایش Live:
-
-```bash
-journalctl -u xray-user-monitor -f
-```
-
-Logهای Boot فعلی:
-
-```bash
-journalctl -u xray-user-monitor -b
-```
-
-Boot قبلی:
-
-```bash
-journalctl -u xray-user-monitor -b -1
-```
-
----
-
-# بررسی اینکه Monitor بعد از Reboot فعال است
-
-```bash
-systemctl is-enabled xray-user-monitor
-```
-
-باید:
-
-```text
-enabled
-```
-
-نمایش دهد.
-
-سپس:
-
-```bash
-systemctl is-active xray-user-monitor
-```
-
-باید:
-
-```text
-active
-```
-
-نمایش دهد.
-
----
-
-# مصرف منابع
-
-این Monitor عمداً برای اجرا روی Production Node طراحی شده است.
-
-برای کاهش Priority سرویس از تنظیمات systemd زیر استفاده می‌شود:
-
-```ini
+CONF
+fi
+chmod 0644 "$CONF_FILE"
+
+cat > "$SERVICE_FILE" <<'SERVICE'
+[Unit]
+Description=Lightweight Xray per-user historical load monitor
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/xray-user-monitor.conf
+ExecStart=/usr/bin/python3 /opt/xray-user-monitor/monitor.py
+Restart=always
+RestartSec=5
 Nice=15
 IOSchedulingClass=idle
 CPUWeight=10
 IOWeight=10
 OOMScoreAdjust=500
-```
-
-بنابراین در زمان فشار، سیستم منابع را ترجیحاً در اختیار Workload اصلی قرار می‌دهد.
-
-همچنین:
-
-- Docker دائماً اجرا نمی‌شود.
-- `ss` فقط هنگام High CPU اجرا می‌شود.
-- Queryها Timeout دارند.
-- History محدود است.
-- Top-N User ذخیره می‌شود.
-- Cleanup خودکار انجام می‌شود.
-
----
-
-# Security
-
-سرویس با برخی محدودیت‌های systemd اجرا می‌شود:
-
-```ini
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
+ReadWritePaths=/var/lib/xray-user-monitor
+ReadOnlyPaths=/opt/xray-user-monitor
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=true
-```
 
-فقط مسیر زیر Write Access دارد:
+[Install]
+WantedBy=multi-user.target
+SERVICE
 
-```text
-/var/lib/xray-user-monitor
-```
-
-و فایل‌های برنامه از:
-
-```text
-/opt/xray-user-monitor
-```
-
-به‌صورت Read-Only در اختیار سرویس هستند.
-
----
-
-# Troubleshooting
-
-## Stats API Error
-
-بررسی کنید Xray API روی Port موردنظر Listen می‌کند:
-
-```bash
-ss -lntp | grep xray
-```
-
-در Marzban Node معمولاً چیزی شبیه زیر مشاهده می‌شود:
-
-```text
-LISTEN ... *:62051 ... users:(("xray",pid=...,fd=...))
-```
-
-Config را بررسی کنید:
-
-```bash
-cat /etc/xray-user-monitor.conf
-```
-
----
-
-## تست TLS API
-
-```bash
-openssl s_client \
-  -connect 127.0.0.1:62051 \
-  -alpn h2 \
-  -brief \
-  </dev/null
-```
-
-اگر Connection برقرار شود، Xray API روی TLS پاسخ می‌دهد.
-
----
-
-## تست grpcurl
-
-```bash
-grpcurl --version
-```
-
-سپس:
-
-```bash
-grpcurl \
-  -insecure \
-  -import-path /opt/xray-user-monitor \
-  -proto command.proto \
-  -d '{"pattern":"user>>>","reset":false}' \
-  127.0.0.1:62051 \
-  xray.app.stats.command.StatsService/QueryStats
-```
-
-اگر Stats فعال باشد، باید Counterهای Userها نمایش داده شوند.
-
----
-
-## Database ایجاد نشده
-
-ابتدا وضعیت سرویس:
-
-```bash
-systemctl status xray-user-monitor --no-pager
-```
-
-سپس:
-
-```bash
-journalctl -u xray-user-monitor -n 100 --no-pager
-```
-
-بررسی مسیر:
-
-```bash
-ls -lah /var/lib/xray-user-monitor/
-```
-
----
-
-## xraymon پیدا نمی‌شود
-
-بررسی:
-
-```bash
-ls -l /usr/local/bin/xraymon
-```
-
-باید Symlink به:
-
-```text
-/opt/xray-user-monitor/report.py
-```
-
-باشد.
-
----
-
-## Xray Process پیدا نمی‌شود
-
-بررسی:
-
-```bash
-pgrep -a xray
-```
-
-یا:
-
-```bash
-ps aux | grep '[x]ray'
-```
-
-Monitor به‌صورت خودکار منتظر ظاهر شدن Process Xray می‌ماند.
-
----
-
-# Backup
-
-برای Backup ساده History:
-
-```bash
-cp /var/lib/xray-user-monitor/history.db /root/xray-monitor-history.db
-```
-
-برای Backup سازگارتر زمانی که سرویس فعال است:
-
-```bash
-python3 - <<'PY'
-import sqlite3
-
-src = sqlite3.connect("/var/lib/xray-user-monitor/history.db")
-dst = sqlite3.connect("/root/xray-monitor-history.db")
-
-with dst:
-    src.backup(dst)
-
-dst.close()
-src.close()
-
-print("Backup completed.")
-PY
-```
-
----
-
-# Reset History
-
-> این عملیات تمام History مانیتور را حذف می‌کند.
-
-ابتدا سرویس را Stop کنید:
-
-```bash
-systemctl stop xray-user-monitor
-```
-
-سپس:
-
-```bash
-rm -f /var/lib/xray-user-monitor/history.db
-rm -f /var/lib/xray-user-monitor/history.db-wal
-rm -f /var/lib/xray-user-monitor/history.db-shm
-rm -f /var/lib/xray-user-monitor/events.log
-```
-
-دوباره سرویس را Start کنید:
-
-```bash
-systemctl start xray-user-monitor
-```
-
-Database جدید به‌صورت خودکار ایجاد می‌شود.
-
----
-
-# حذف کامل
-
-```bash
-systemctl disable --now xray-user-monitor
-```
-
-سپس:
-
-```bash
-rm -f /etc/systemd/system/xray-user-monitor.service
 systemctl daemon-reload
-```
-
-حذف برنامه:
-
-```bash
-rm -rf /opt/xray-user-monitor
-```
-
-حذف Config:
-
-```bash
-rm -f /etc/xray-user-monitor.conf
-```
-
-در صورت عدم نیاز به History:
-
-```bash
-rm -rf /var/lib/xray-user-monitor
-```
-
-حذف CLI:
-
-```bash
-rm -f /usr/local/bin/xraymon
-```
-
-`grpcurl` را فقط در صورتی حذف کنید که برنامه دیگری از آن استفاده نمی‌کند.
-
----
-
-# محدودیت‌های مهم
-
-## CPU دقیق per-user وجود ندارد
-
-همه کاربران از یک Process مشترک:
-
-```text
-xray
-```
-
-استفاده می‌کنند.
-
-بنابراین سیستم‌عامل اطلاعاتی مشابه زیر ندارد:
-
-```text
-ali      120% CPU
-reza      40% CPU
-baduser  220% CPU
-```
-
-CPU فقط برای Process Xray قابل اندازه‌گیری است.
-
-این Monitor برای Attribution از Correlation استفاده می‌کند:
-
-```text
-Xray CPU spike
-      +
-User traffic spike
-      +
-Connection count
-      +
-Online IP count
-      +
-Exact timestamp
-```
-
----
-
-## TCP Connection تخمینی است
-
-Connection attribution بر اساس IPهای آنلاین Xray و Socketهای Process انجام می‌شود.
-
-اگر یک Public IP همزمان متعلق به چند User باشد، برای جلوگیری از Attribution اشتباه، Connection به آن User نسبت داده نمی‌شود.
-
-این رفتار عمداً محافظه‌کارانه است.
-
----
-
-## UDP
-
-`ss` در Deep Scan فعلی روی Established TCP Connectionها تمرکز دارد.
-
-بنابراین رفتارهای UDP ممکن است به‌اندازه TCP قابل مشاهده نباشند.
-
-Traffic همچنان از Xray Stats ثبت می‌شود.
-
----
-
-## GetUsersStats
-
-برخی نسخه‌های Xray ممکن است API جدید `GetUsersStats` را نداشته باشند یا Online Map موردنیاز فعال نباشد.
-
-در این حالت Monitoring اصلی قطع نمی‌شود.
-
-ابزار همچنان از:
-
-```text
-QueryStats
-```
-
-برای Traffic استفاده می‌کند و فقط بخش Online IP / TCP enrichment ممکن است در دسترس نباشد.
-
----
-
-# پیشنهاد برای Production
-
-برای بیشتر Marzban Nodeها:
-
-```ini
-SAMPLE_INTERVAL=15
-
-CPU_EVENT_THRESHOLD=100
-CPU_CLEAR_THRESHOLD=70
-EVENT_CLEAR_SAMPLES=3
-
-TOP_USERS=10
-RETENTION_DAYS=30
-
-DEEP_SCAN_ON_HIGH_CPU=1
-RPC_TIMEOUT=4
-```
-
-ترکیب مناسبی بین:
-
-```text
-Accuracy
-History
-Disk Usage
-CPU Usage
-API Load
-```
-
-ایجاد می‌کند.
-
----
-
-# Workflow پیشنهادی هنگام حادثه
-
-اگر Xray CPU بالا رفت:
-
-```bash
-xraymon status
-```
-
-اگر سرور مجبور به Reboot شد، بعد از بالا آمدن:
-
-```bash
-xraymon events 24
-```
-
-Incident را پیدا کنید:
-
-```bash
-xraymon show <EVENT-ID>
-```
-
-سپس Top Userها را بررسی کنید:
-
-```bash
-xraymon top 24
-```
-
-و برای User مشکوک:
-
-```bash
-xraymon user <USERNAME> 24
-```
-
-در نهایت این موارد را کنار هم مقایسه کنید:
-
-```text
-Peak CPU
-Peak User Mbps
-MAX TCP
-MAX IPs
-Incident Duration
-Repeated Incidents
-```
-
----
-
-# Quick Command Reference
-
-```bash
-# Current status
-xraymon status
-
-# Live local display
-watch -n 5 xraymon status
-
-# Incidents during last 7 days
-xraymon events 168
-
-# Incident details
-xraymon show 6
-
-# Top users during last 24 hours
-xraymon top 24
-
-# Specific user history
-xraymon user baduser 48
-
-# Database size
-xraymon size
-
-# Service status
-systemctl status xray-user-monitor --no-pager
-
-# Service logs
-journalctl -u xray-user-monitor -f
-
-# Restart after config changes
-systemctl restart xray-user-monitor
-```
-
----
-
-# Repository Structure پیشنهادی
-
-برای GitHub می‌توانید Repository را به این شکل نگه دارید:
-
-```text
-xray-user-monitor/
-├── README.md
-└── install-xray-user-monitor.sh
-```
-
----
-
-# هدف پروژه
-
-هدف این ابزار Block یا Limit کردن خودکار کاربران نیست.
-
-هدف اصلی:
-
-> **ثبت شواهد کافی با کمترین سربار ممکن، برای مشخص کردن کاربر یا رفتار مشکوک در زمان افزایش غیرعادی مصرف Xray.**
-
-بهتر است Ban، Disable یا Limit کردن User فقط بعد از بررسی Incident و اطمینان از رفتار غیرعادی انجام شود.
+systemctl enable --now xray-user-monitor.service
+
+sleep 2
+
+echo
+echo "============================================================"
+echo "Xray User Monitor installed"
+echo "============================================================"
+echo "Service : xray-user-monitor.service"
+echo "Config  : $CONF_FILE"
+echo "Database: $DATA_DIR/history.db"
+echo "Events  : $DATA_DIR/events.log"
+echo
+echo "Useful commands:"
+echo "  systemctl status xray-user-monitor --no-pager"
+echo "  journalctl -u xray-user-monitor -f"
+echo "  xraymon status"
+echo "  xraymon events 168"
+echo "  xraymon top 24"
+echo "  xraymon show <EVENT-ID>"
+echo "  xraymon user <USERNAME> 24"
+echo "  xraymon size"
+echo "  watch -n 5 xraymon status"
+echo
+echo "Current service status:"
+systemctl --no-pager --full status xray-user-monitor.service || true
