@@ -5,7 +5,7 @@
 ## دانلود
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/OpsVault/main/Linux/floating-ip/floating-ip.sh   -o /usr/local/bin/floating-ip
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/OpsVault/refs/heads/main/linux/floating-ip/floating-ip.sh  -o /usr/local/bin/floating-ip
 
 chmod +x /usr/local/bin/floating-ip
 ```
