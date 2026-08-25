@@ -15,13 +15,13 @@ chmod +x /usr/local/bin/floating-ip
 ### اضافه کردن IP
 
 ```bash
-sudo floating-ip add 116.203.164.1
+sudo floating-ip add [IP]
 ```
 
 ### حذف IP
 
 ```bash
-sudo floating-ip remove 116.203.164.1
+sudo floating-ip remove [IP]
 ```
 
 ### نمایش IPهای تنظیم‌شده
