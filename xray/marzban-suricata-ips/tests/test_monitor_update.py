@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,6 +23,21 @@ MONITOR, UPDATE = load("monitor"), load("project_update")
 
 
 class MonitorTests(unittest.TestCase):
+    def test_reported_stream_error_drops_are_not_shown_as_running_clean(self):
+        reader = MONITOR.EventReader()
+        reader.stats_time = time.time()
+        reader.stats = {"decoder": {"pkts": 3528326}, "detect": {"alert": 0},
+                        "ips": {"accepted": 3524061, "blocked": 4265,
+                                "drop_reason": {"rules": 0, "stream_error": 4265}}}
+        current = {"time": 2, "service": {"ActiveState": "active", "CPUUsageNSec": "1", "MemoryCurrent": "1"},
+                   "table": True, "bound": True, "queued": 0, "queue_drops": 0,
+                   "counters": {}, "network": {}}
+        with patch.object(MONITOR, "text_file", return_value=""):
+            report = MONITOR.render(current, dict(current, time=1), reader)
+        self.assertIn("WARNING:", report)
+        self.assertIn("stream_error=4265", report)
+        self.assertIn("rules=0", report)
+
     def test_unknown_or_stale_statistics_never_show_running(self):
         for age in (None, 46, 600):
             self.assertEqual(MONITOR.health(True, True, True, age, 99, [])[0], "WAITING")

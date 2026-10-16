@@ -128,7 +128,17 @@ def delta(current, previous, seconds):
     return (current - previous) / seconds
 
 
-def health(active, table, bound, stats_age, packets, recent_alerts, new_drops=0, queued=0, stalled=False):
+def drop_breakdown(stats):
+    ips = stats.get("ips", {})
+    total = number(ips.get("blocked"))
+    raw = ips.get("drop_reason", {})
+    reasons = {key: count for key, value in raw.items() if (count := number(value)) is not None and count >= 0}
+    rules = reasons.get("rules")
+    other = max(0, total - (rules or 0)) if total is not None else sum(count for key, count in reasons.items() if key != "rules")
+    return total, rules, other, reasons
+
+
+def health(active, table, bound, stats_age, packets, recent_alerts, new_drops=0, queued=0, stalled=False, engine_other_drops=0):
     if active is None:
         return "WARNING", "Cannot read the engine state; inspection is not confirmed."
     if not active:
@@ -141,6 +151,8 @@ def health(active, table, bound, stats_age, packets, recent_alerts, new_drops=0,
         return "WARNING", "Queue pressure or loss detected; inspection may be delayed or bypassed."
     if stalled:
         return "WARNING", "Traffic is reaching the queue but engine packet counters are not progressing."
+    if engine_other_drops:
+        return "WARNING", "Engine drops outside direct rule matches are recorded since start; inspect the reasons below."
     if recent_alerts:
         return "ALERT", "Recent rule matches detected. Review the events below."
     if not packets:
@@ -190,7 +202,11 @@ def render(current, previous, reader):
     memory = number(service.get("MemoryCurrent"))
     stats = reader.stats or {}
     processed = number(stats.get("decoder", {}).get("pkts"))
-    blocked = number(stats.get("ips", {}).get("blocked"))
+    blocked, rule_drops, other_drops, reasons = drop_breakdown(stats)
+    reason_text = "rules=" + (str(rule_drops) if rule_drops is not None else "unavailable")
+    reason_text += "".join(f"  {safe(key)}={value}" for key, value in sorted(reasons.items()) if key != "rules" and value)
+    if blocked is not None and blocked > sum(reasons.values()):
+        reason_text += f"  unattributed={blocked - sum(reasons.values())}"
     recent = [event for event in reader.alerts if 0 <= now - timestamp(event.get("timestamp")) <= 300
               and event.get("alert", {}).get("signature_id") != 9900001]
     loss = max(0, current["queue_drops"] - previous["queue_drops"]) if previous else 0
@@ -209,7 +225,7 @@ def render(current, previous, reader):
     reader.observed_packets = processed
     stalled = reader.stalled_since is not None and time.monotonic() - reader.stalled_since > 30
     active = service["ActiveState"] == "active" if "ActiveState" in service else None
-    state, explanation = health(active, current["table"], current["bound"], age, processed, recent, loss, current["queued"], stalled)
+    state, explanation = health(active, current["table"], current["bound"], age, processed, recent, loss, current["queued"], stalled, other_drops)
     version = text_file("/etc/marzban-ips/version", "2.0 (legacy)")
     available_memory = None
     for line in text_file("/proc/meminfo").splitlines():
@@ -225,7 +241,11 @@ def render(current, previous, reader):
              f"Queue waiting: {current['queued']}  queue loss since start: {current['queue_drops']}  new loss: {loss}",
              f"Engine packets since start: {processed if processed is not None else 'unavailable'}  "
              f"blocked packets: {blocked if blocked is not None else 'unavailable'}  "
-             f"stats age: {readable(age, 's')}", "", "Interface traffic (separate interfaces; not summed):", "  Interface        IN Mbps       OUT Mbps"]
+             f"stats age: {readable(age, 's')}",
+             f"Engine drop reasons since start: {reason_text}",
+             f"Signature alerts since start: {stats.get('detect', {}).get('alert', 'unavailable')}",
+             "Blocked packets are not a count of malware detections.",
+             "", "Interface traffic (separate interfaces; not summed):", "  Interface        IN Mbps       OUT Mbps"]
     for name, values in sorted(current["network"].items())[:12]:
         old = previous["network"].get(name, {}) if previous else {}
         rx, tx = delta(values["rx"], old.get("rx"), elapsed), delta(values["tx"], old.get("tx"), elapsed)

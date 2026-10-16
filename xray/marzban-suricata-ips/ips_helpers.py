@@ -71,6 +71,8 @@ def configure(source, destination, refresh=False):
         config["nfq"] = {"mode": "accept", "fail-open": True, "batchcount": 20}
         config["flow"] = {"memcap": "32mb", "hash-size": 16384, "prealloc": 1000, "memcap-policy": "pass-packet"}
         config["stream"] = {"memcap": "32mb", "prealloc-sessions": 512, "inline": True,
+                            # Drop selected signatures, not TCP state validation failures.
+                            "drop-invalid": False,
                             "midstream": True, "midstream-policy": "ignore", "memcap-policy": "pass-flow",
                             "reassembly": {"memcap": "64mb", "depth": "256kb", "memcap-policy": "pass-flow"}}
         config.setdefault("defrag", {}).update({"memcap": "16mb", "memcap-policy": "pass-packet"})

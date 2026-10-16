@@ -81,7 +81,7 @@ if run; then echo 'FAIL: startup failure accepted'; exit 1; fi
 [[ $(cat "$box/var/lib/marzban-ips/rules/suricata.rules") == original-rules && -e $box/table ]]
 echo 'PASS: failed new engine rolls back code, configuration, rules and interception'
 run
-[[ $(cat "$box/etc/marzban-ips/version") == 2.1.0 && -e $box/table ]]
+[[ $(cat "$box/etc/marzban-ips/version") == 2.1.1 && -e $box/table ]]
 [[ -s $box/opt/marzban-ips/monitor.py && -s $box/opt/marzban-ips/project_update.py ]]
 echo 'PASS: Ubuntu 22.04 upgrade publishes new version and restores active interception'
 touch "$box/etc/marzban-ips/disabled"

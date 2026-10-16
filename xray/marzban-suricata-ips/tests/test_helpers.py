@@ -6,6 +6,8 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +25,26 @@ class HelpersTests(unittest.TestCase):
 
     def rule(self, sid, message, extra="", action="alert"):
         return f'{action} tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"{message}"; {extra} sid:{sid}; rev:1;)\n'
+
+    def test_stream_errors_do_not_drop_while_signature_ips_stays_enabled(self):
+        # Exercise generation without depending on the YAML serializer/toolchain.
+        source, destination = self.directory / "base", self.directory / "generated"
+        source.write_text("fixture", encoding="utf-8")
+        captured = {}
+
+        def dump(config, **kwargs):
+            captured.update(config)
+            return json.dumps(config)
+
+        serializer = SimpleNamespace(safe_load=lambda handle: {"vars": {}}, safe_dump=dump)
+        for major in (6, 7, 8):
+            with self.subTest(major=major), patch.dict(sys.modules, {"yaml": serializer}), \
+                    patch.object(HELPERS, "local_networks", return_value="[10.0.0.4/32]"), \
+                    patch.object(HELPERS, "engine_major", return_value=major):
+                HELPERS.configure(source, destination)
+                self.assertIs(captured["stream"].get("drop-invalid"), False)
+                self.assertIs(captured["stream"]["inline"], True)
+                self.assertEqual(captured["rule-files"], ["suricata.rules"])
 
     def select(self, text):
         source, destination = self.directory / "source", self.directory / "rules"
@@ -116,6 +138,7 @@ class HelpersTests(unittest.TestCase):
         self.assertEqual(source.read_text(), original)
         self.assertTrue(config["nfq"]["fail-open"])
         self.assertEqual(config["exception-policy"], "ignore")
+        self.assertFalse(config["stream"]["drop-invalid"])
         self.assertFalse(config["outputs"][0]["eve-log"]["types"][0]["alert"]["payload"])
         self.assertEqual(config["rule-files"], ["suricata.rules"])
         with patch.object(HELPERS, "local_networks", return_value="[198.51.100.9/32]"):
