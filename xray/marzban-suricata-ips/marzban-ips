@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 027
+TAB=marzban_ips
+CONFIG=/etc/suricata/marzban-ips.yaml
+RULES=/var/lib/marzban-ips/rules/suricata.rules
+EVE=/var/log/marzban-suricata/eve.json
+HELPER=/opt/marzban-ips/ips_helpers.py
+error() { echo "ERROR: $*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || error 'Run with sudo.'
+remove_filter() {
+    if nft list table inet "$TAB" >/dev/null 2>&1; then nft delete table inet "$TAB"; fi
+}
+queue_ready() {
+    local queue attempt
+    queue="$(cat /etc/marzban-ips/queue-number)"
+    for ((attempt=0; attempt<100; attempt++)); do
+        if systemctl is-active --quiet marzban-suricata.service &&
+           awk -v q="$queue" '$1 == q && $2 != 0 {found=1} END {exit !found}' /proc/net/netfilter/nfnetlink_queue 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+# These actions run inside systemd jobs; they must not contend with a CLI
+# operation waiting for that same job (enable/update/refresh).
+case "${1:-}" in
+ apply)
+    [[ ! -e /etc/marzban-ips/disabled ]] || error 'IPS is disabled.'
+    queue_ready || error 'NFQUEUE listener is not ready; no interception attached.'
+    if ! nft list table inet "$TAB" >/dev/null 2>&1; then
+        nft -c -f /etc/marzban-ips/queue.nft
+        nft -f /etc/marzban-ips/queue.nft
+    fi
+    exit 0 ;;
+ remove) remove_filter; exit 0 ;;
+ prepare)
+    [[ ! -e /etc/marzban-ips/disabled ]] || error 'IPS is disabled.'
+    python3 "$HELPER" refresh "$CONFIG" "$CONFIG"
+    exit 0 ;;
+esac
+case "${1:-}" in
+ enable|update|refresh|uninstall)
+    exec 9>/run/lock/marzban-ips.lock
+    flock -n 9 || error 'Another installation or management operation is running. Retry shortly.' ;;
+esac
+case "${1:-}" in
+ enable)
+    [[ -f $CONFIG && -s $RULES ]] || error 'Not installed or rules missing.'
+    rm -f -- /etc/marzban-ips/disabled
+    systemctl enable --now marzban-suricata.service
+    queue_ready || error 'Suricata did not bind NFQUEUE. Inspect journalctl -u marzban-suricata.'
+    systemctl enable --now marzban-ips-filter.service
+    # Restore a table removed externally even if the oneshot unit is still active.
+    "$0" apply
+    echo 'IPS enabled' ;;
+ disable)
+    # Recovery deliberately never waits for the update/install lock.
+    touch /etc/marzban-ips/disabled
+    remove_filter
+    systemctl disable --now marzban-ips-filter.service marzban-suricata.service
+    echo 'IPS disabled across reboots; inspection CPU/memory released.' ;;
+ version)
+    printf 'Marzban IPS '; cat /etc/marzban-ips/version 2>/dev/null || echo '2.0 (legacy)' ;;
+ upgrade)
+    shift
+    exec python3 /opt/marzban-ips/project_update.py "$@" ;;
+ live|watch)
+    shift
+    exec python3 /opt/marzban-ips/monitor.py "$@" ;;
+ status)
+    exec python3 /opt/marzban-ips/monitor.py --once ;;
+ diagnostics)
+    systemctl --no-pager --plain is-active marzban-suricata.service || true
+    nft -a list table inet "$TAB" 2>/dev/null || echo 'Interception disabled'
+    echo 'Detected source addresses:'
+    if [[ -r $CONFIG ]]; then
+        python3 -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["vars"]["address-groups"]["HOME_NET"])' "$CONFIG"
+    fi
+    if [[ -r $RULES ]]; then printf 'Active drop rules: '; grep -c '^drop ' "$RULES" || true; fi
+    systemctl show marzban-suricata.service -p MemoryCurrent -p MemoryMax -p CPUUsageNSec -p CPUQuotaPerSecUSec --no-pager
+    systemctl --no-pager list-timers 'marzban-ips-*.timer'
+    echo 'NFQUEUE: queue / port-id / queued / mode / range / kernel-dropped / user-dropped / sequence'
+    cat /proc/net/netfilter/nfnetlink_queue 2>/dev/null || true ;;
+ alerts)
+    if [[ -r $EVE ]]; then python3 "$HELPER" events "$EVE"; else echo 'No alert log yet'; fi ;;
+ update)
+    [[ -f $CONFIG ]] || error 'Not installed.'
+    # Stage on the same filesystem as the live rules, then publish with rename.
+    tmp="$(mktemp -d /var/lib/marzban-ips/.update-XXXXXX)"
+    swapped=0
+    had_old=0
+    was_active=0
+    systemctl is-active --quiet marzban-suricata.service && was_active=1
+    rollback() {
+        local rc=$?
+        if ((swapped && rc != 0)); then
+            echo 'Update failed; restoring previous rules.' >&2
+            if ((had_old)); then mv -f -- "$tmp/previous.rules" "$RULES"; else rm -f -- "$RULES"; fi
+            if ((was_active)) && [[ ! -e /etc/marzban-ips/disabled ]] && systemctl is-enabled --quiet marzban-suricata.service; then
+                if ! systemctl restart marzban-suricata.service || ! queue_ready; then
+                    remove_filter
+                    echo 'Recovery failed. Interception removed; run marzban-ips disable and inspect logs.' >&2
+                fi
+            fi
+        fi
+        rm -rf -- "$tmp"
+        exit "$rc"
+    }
+    trap rollback EXIT
+    # Empty explicit filters/config prevent inheriting somebody else's feed/hooks.
+    suricata-update --config /etc/marzban-ips/update.yaml \
+        --data-dir /var/lib/marzban-ips/update --suricata-conf "$CONFIG" \
+        --output "$tmp/download" --no-test --no-reload \
+        --enable-conf /etc/marzban-ips/empty.conf --disable-conf /etc/marzban-ips/empty.conf \
+        --drop-conf /etc/marzban-ips/empty.conf --modify-conf /etc/marzban-ips/empty.conf
+    python3 "$HELPER" select "$tmp/download/suricata.rules" "$tmp/candidate.rules" /etc/marzban-ips/selftest.rules
+    suricata -T --simulate-ips --init-errors-fatal -c "$CONFIG" -S "$tmp/candidate.rules" -l "$tmp"
+    if [[ -f $RULES ]] && cmp -s -- "$tmp/candidate.rules" "$RULES"; then
+        date -u +%FT%TZ > /var/lib/marzban-ips/rules-checked-at
+        echo 'Selected rules unchanged; no engine restart required.'
+        exit 0
+    fi
+    if [[ -f $RULES ]]; then cp -p -- "$RULES" "$tmp/previous.rules"; had_old=1; fi
+    mv -f -- "$tmp/candidate.rules" "$RULES"
+    swapped=1
+    # Honor an emergency disable issued while the download/test was running.
+    if ((was_active)) && [[ ! -e /etc/marzban-ips/disabled ]] && systemctl is-enabled --quiet marzban-suricata.service; then
+        systemctl restart marzban-suricata.service
+        queue_ready || error 'Updated engine failed to bind NFQUEUE.'
+    fi
+    swapped=0
+    date -u +%FT%TZ > /var/lib/marzban-ips/rules-checked-at
+    echo 'Selected rules validated and installed.' ;;
+ refresh)
+    [[ -r $CONFIG ]] || error 'Not installed.'
+    tmp="$(mktemp -d /var/lib/marzban-ips/.refresh-XXXXXX)"
+    trap 'rm -rf -- "$tmp"' EXIT
+    result="$(python3 "$HELPER" refresh "$CONFIG" "$tmp/config.yaml")"
+    if [[ $result == changed ]]; then
+        suricata -T --simulate-ips --init-errors-fatal -c "$tmp/config.yaml" -l "$tmp"
+        cp -p -- "$CONFIG" "$tmp/previous.yaml"
+        mv -f -- "$tmp/config.yaml" "$CONFIG"
+        if [[ ! -e /etc/marzban-ips/disabled ]] && systemctl is-active --quiet marzban-suricata.service && systemctl is-enabled --quiet marzban-suricata.service; then
+            if ! systemctl restart marzban-suricata.service || ! queue_ready; then
+                mv -f -- "$tmp/previous.yaml" "$CONFIG"
+                remove_filter
+                systemctl stop marzban-suricata.service || true
+                error 'Address refresh failed; previous configuration restored and interception removed. Inspect logs.'
+            fi
+        fi
+        echo 'Source addresses refreshed.'
+    fi ;;
+ test)
+    nft list table inet "$TAB" >/dev/null 2>&1 || error 'IPS is disabled; use marzban-ips enable first.'
+    queue_ready || error 'NFQUEUE not ready.'
+    # A new source port and timestamp prevent matching an old self-test alert.
+    port=$((40000 + RANDOM % 20000))
+    started="$(date +%s.%N)"
+    echo 'Sending a harmless direct HTTP test (not through a VPN user).'
+    curl --silent --show-error --connect-timeout 4 --max-time 8 -4 --noproxy '*' \
+        --local-port "$port" -H "Host: $port.ips-test.invalid" 'http://example.com/' >/dev/null 2>&1 || true
+    for ((attempt=0; attempt<10; attempt++)); do
+        if [[ -r $EVE ]] && python3 "$HELPER" test-event "$EVE" "$port" "$started"; then
+            echo 'PASS: A fresh matching self-test request was blocked (SID 9900001).'
+            exit 0
+        fi
+        sleep 1
+    done
+    error 'INCONCLUSIVE: no fresh blocked event. Check DNS, outbound HTTP, log rotation and NFQUEUE counters.' ;;
+ uninstall)
+    [[ -f /etc/marzban-ips/installed ]] || error 'Ownership marker missing; refusing to remove files.'
+    systemctl disable --now marzban-ips-update.timer marzban-ips-refresh.timer marzban-ips-logrotate.timer || true
+    systemctl stop marzban-ips-update.service marzban-ips-refresh.service marzban-ips-logrotate.service || true
+    touch /etc/marzban-ips/disabled
+    remove_filter
+    systemctl disable --now marzban-ips-filter.service marzban-suricata.service || true
+    for unit in marzban-suricata.service marzban-ips-filter.service marzban-ips-update.service \
+        marzban-ips-update.timer marzban-ips-refresh.service marzban-ips-refresh.timer \
+        marzban-ips-logrotate.service marzban-ips-logrotate.timer; do
+        rm -f -- "/etc/systemd/system/$unit"
+    done
+    rm -f -- "$CONFIG" /etc/marzban-ips/{installed,disabled,version,selftest.rules,update.yaml,empty.conf,queue.nft,queue-number,logrotate.conf} \
+        /opt/marzban-ips/{ips_helpers.py,monitor.py,project_update.py} /usr/local/sbin/marzban-ips
+    systemctl daemon-reload
+    echo 'Uninstalled. Logs/rule cache retained under /var/log/marzban-suricata and /var/lib/marzban-ips.'
+    echo 'Distribution packages are retained.' ;;
+ *)
+    echo 'Usage: sudo marzban-ips {status|live|version|upgrade [--force]|update|alerts|refresh|disable|enable|diagnostics|test|uninstall}'
+    exit 2 ;;
+esac

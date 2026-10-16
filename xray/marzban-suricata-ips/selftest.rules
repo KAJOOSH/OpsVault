@@ -1,0 +1,1 @@
+drop http $HOME_NET any -> $EXTERNAL_NET any (msg:"MARZBAN IPS SELFTEST"; flow:established,to_server; http.host; content:".ips-test.invalid"; endswith; sid:9900001; rev:2;)

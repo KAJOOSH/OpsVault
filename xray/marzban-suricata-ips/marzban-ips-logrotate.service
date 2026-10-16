@@ -1,0 +1,9 @@
+[Unit]
+Description=Rotate the dedicated Marzban IPS alert log
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate --state /var/lib/marzban-ips/logrotate.status /etc/marzban-ips/logrotate.conf
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=1min

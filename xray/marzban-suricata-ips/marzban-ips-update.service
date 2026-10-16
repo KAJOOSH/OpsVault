@@ -1,0 +1,15 @@
+[Unit]
+Description=Update ET Open Suricata IPS signatures for Marzban
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/marzban-ips update
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=50%
+MemoryMax=768M
+MemorySwapMax=0
+TimeoutStartSec=10min
+UMask=0027

@@ -1,0 +1,18 @@
+# This table is owned exclusively by marzban-ips.
+# priority 10 runs after standard iptables/UFW filter chains (priority 0).
+# Original host-created sessions go OUT; their replies come IN.
+# Original inbound Xray connections and outbound replies to clients are NOT queued.
+# Output is before postrouting SNAT, input after prerouting reverse NAT.
+# All interfaces/IPv4/IPv6 are covered, including floating source addresses.
+table inet marzban_ips {
+  chain egress {
+    type filter hook output priority 10; policy accept;
+    oifname != "lo" meta l4proto { tcp, udp } ct direction original counter queue num @QUEUE@ bypass comment "ips-egress"
+    oifname != "lo" meta l4proto { tcp, udp } ct direction reply counter comment "client-egress"
+  }
+  chain ingress_replies {
+    type filter hook input priority 10; policy accept;
+    iifname != "lo" meta l4proto { tcp, udp } ct direction reply counter queue num @QUEUE@ bypass comment "ips-ingress"
+    iifname != "lo" meta l4proto { tcp, udp } ct direction original counter comment "client-ingress"
+  }
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Queue host-originated flows into Suricata without touching Marzban inbound listeners
+Wants=marzban-suricata.service
+After=marzban-suricata.service nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/marzban-ips apply
+ExecStop=/usr/local/sbin/marzban-ips remove
+
+[Install]
+WantedBy=multi-user.target

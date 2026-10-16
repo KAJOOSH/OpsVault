@@ -1,0 +1,28 @@
+[Unit]
+Description=Suricata NFQUEUE IPS for Marzban Node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/marzban-ips prepare
+ExecStart=/usr/bin/suricata --init-errors-fatal -c /etc/suricata/marzban-ips.yaml -l /var/log/marzban-suricata -q QUEUE_NUMBER --runmode workers
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65535
+CPUAccounting=yes
+MemoryAccounting=yes
+CPUQuota=50%
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+Nice=10
+OOMScoreAdjust=500
+UMask=0027
+TimeoutStartSec=45
+TimeoutStopSec=20
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=100
+
+[Install]
+WantedBy=multi-user.target
